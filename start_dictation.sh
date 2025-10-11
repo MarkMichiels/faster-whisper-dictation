@@ -8,6 +8,6 @@ cd "$(dirname "$0")"
 # Activate the virtual environment.
 source venv/bin/activate
 
-# Start the dictation script with the 'small' model.
+# Start the dictation script with the 'medium' model.
 # It will run in the background.
-python3 dictation.py -m small
+python3 dictation.py -m medium
