@@ -125,11 +125,10 @@ class DoubleKeyListener():
         self.activate_callback = activate_callback
         self.deactivate_callback = deactivate_callback
         self.key = key
-        self.pressed = 0
         self.last_press_time = 0
 
     def on_press(self, key):
-        if key == self.key:
+        if key == keyboard.Key.ctrl_r:
             current_time = time.time()
             is_dbl_click = current_time - self.last_press_time < 0.5
             self.last_press_time = current_time
@@ -269,7 +268,7 @@ class App():
             return k
 
         if (platform.system() != 'Windows' and not self.args.key_combo) or self.args.double_key:
-            key = self.args.double_key or (platform.system() == 'Linux' and '<super_r>') or '<cmd_r>'
+            key = self.args.double_key or (platform.system() == 'Linux' and '<ctrl_r>') or '<cmd_r>'
             keylistener= DoubleKeyListener(self.start, self.stop, normalize_key_names(key, parse=True))
             self.m.on_enter_READY(lambda *_: print("Double tap ", key, " to start recording. Tap again to stop recording"))
         else:

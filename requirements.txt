@@ -1,14 +1,26 @@
-av==10.*
-ctranslate2>=3.17,<4
+# --- Configuratie voor Desktop (Ubuntu 22.04 / Python 3.10) ---
+# Gecorrigeerd op 11 oktober 2025
+# Gecorrigeerd voor Python 3.12+ op 10 oktober 2025
+av==15.1.0
+faster-whisper==1.2.0
+ctranslate2>=4.0,<5
+
+# --- Oorspronkelijke Configuratie voor Laptop (werkte niet op desktop) ---
+# av==10.*
+# ctranslate2>=3.17,<4
+# faster-whisper
+# pynput
+# --------------------------------------------------------------------
+
+# Originele overige dependencies
 huggingface_hub>=0.13
 tokenizers>=0.13,<0.15
 onnxruntime>=1.14,<2
 pyaudio
-pynput
 keyboard
+pynput
 argparse
 transitions
 numpy
-faster-whisper
 sounddevice; sys.platform != 'win32'
 soundfile
