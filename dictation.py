@@ -34,16 +34,22 @@ else:
 
 
 class SpeechTranscriber:
-    def __init__(self, callback, model_size='base', device='cpu', compute_type="int8"):
+    def __init__(self, callback, model_size='base', device='cpu', compute_type="int8", language=None):
         self.callback = callback
         self.model = WhisperModel(model_size, device=device, compute_type=compute_type)
+        self.language = language
 
     def transcribe(self, event):
         print('Transcribing...')
         audio = event.kwargs.get('audio', None)
         if audio is not None:
-            segments, info = self.model.transcribe(audio, beam_size=5)
-            print("Detected language '%s' with probability %f" % (info.language, info.language_probability))
+            # Force language if specified, otherwise auto-detect
+            if self.language:
+                segments, info = self.model.transcribe(audio, beam_size=5, language=self.language)
+                print("Using forced language: '%s'" % self.language)
+            else:
+                segments, info = self.model.transcribe(audio, beam_size=5)
+                print("Detected language '%s' with probability %f" % (info.language, info.language_probability))
             self.callback(segments=segments)
         else:
             self.callback(segments=[])
@@ -150,43 +156,50 @@ def parse_args():
     parser = argparse.ArgumentParser(description='Dictation app powered by Faster whisper')
     parser.add_argument('-m', '--model-name', type=str, default='base',
                         help='''\
-Size of the model to use
-(tiny, tiny.en, base, base.en, small, small.en, medium, medium.en, large-v1, large-v2, or large).
-A path to a converted model directory, or a CTranslate2-converted Whisper model ID from the Hugging Face Hub.
-When a size or a model ID is configured, the converted model is downloaded from the Hugging Face Hub.
-Default: base.''')
+ Size of the model to use
+ (tiny, tiny.en, base, base.en, small, small.en, medium, medium.en, large-v1, large-v2, or large).
+ A path to a converted model directory, or a CTranslate2-converted Whisper model ID from the Hugging Face Hub.
+ When a size or a model ID is configured, the converted model is downloaded from the Hugging Face Hub.
+ Default: base.''')
     parser.add_argument('-k', '--key-combo', type=str,
                         help='''\
-Specify the key combination to toggle the app.
-
-See https://pynput.readthedocs.io/en/latest/keyboard.html#pynput.keyboard.Key for a list of keys supported.
-
-Examples: <cmd_l>+<alt>+x , <ctrl>+<alt>+a. Note on windows, the winkey is specified using <cmd>.
-
-Default: <win>+z on Windows (see below for MacOS and Linux defaults).''')
+ Specify the key combination to toggle the app.
+ 
+ See https://pynput.readthedocs.io/en/latest/keyboard.html#pynput.keyboard.Key for a list of keys supported.
+ 
+ Examples: <cmd_l>+<alt>+x , <ctrl>+<alt>+a. Note on windows, the winkey is specified using <cmd>.
+ 
+ Default: <win>+z on Windows (see below for MacOS and Linux defaults).''')
     parser.add_argument('-d', '--double-key', type=str,
                         help='''\
-If key-combo is not set, on macOS/linux the default behavior is double tapping a key to start recording.
-Tap the same key again to stop recording.
-
-On MacOS the key is Right Cmd and on Linux the key is Right Super (Right Win Key)
-
-You can set to a different key for double triggering.
-
-''')
+ If key-combo is not set, on macOS/linux the default behavior is double tapping a key to start recording.
+ Tap the same key again to stop recording.
+ 
+ On MacOS the key is Right Cmd and on Linux the key is Right Super (Right Win Key)
+ 
+ You can set to a different key for double triggering.
+ 
+ ''')
     parser.add_argument('-t', '--max-time', type=int, default=30,
                         help='''\
-Specify the maximum recording time in seconds.
-The app will automatically stop recording after this duration.
-Default: 30 seconds.''')
+ Specify the maximum recording time in seconds.
+ The app will automatically stop recording after this duration.
+ Default: 30 seconds.''')
     parser.add_argument('-v', '--device', type=str, default='cpu',
                         help='''\
-By default we use 'cpu' for inference.
-If you have supported GPU with proper driver and libraries installed, you can set it to 'auto' or 'cuda'.''')
-
+ By default we use 'cpu' for inference.
+ If you have supported GPU with proper driver and libraries installed, you can set it to 'auto' or 'cuda'.''')
+ 
     parser.add_argument('-c', '--compute-type', type=str, default='int8',
                         help='''\
-If your GPU stack supports it, you can set compute-type to 'float32' or 'float16' to improve accuracy. Default 'int8' ''')
+ If your GPU stack supports it, you can set compute-type to 'float32' or 'float16' to improve accuracy. Default 'int8' ''')
+ 
+    parser.add_argument('-l', '--language', type=str, default=None,
+                        help='''\
+ Force a specific language for transcription (e.g., 'nl' for Dutch, 'en' for English).
+ This improves accuracy especially for short audio fragments where auto-detection can fail.
+ If not specified, language will be auto-detected.
+ Common codes: nl (Dutch), en (English), fr (French), de (German), es (Spanish).''')
 
     args = parser.parse_args()
     return args
@@ -214,7 +227,7 @@ class App():
         self.m = m
         self.args = args
         self.recorder    = Recorder(m.finish_recording)
-        self.transcriber = SpeechTranscriber(m.finish_transcribing, args.model_name, args.device, args.compute_type)
+        self.transcriber = SpeechTranscriber(m.finish_transcribing, args.model_name, args.device, args.compute_type, args.language)
         self.replayer    = KeyboardReplayer(m.finish_replaying)
         self.timer = None
 
