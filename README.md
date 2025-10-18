@@ -65,7 +65,7 @@ python3 dictation.py -m small --key-combo="<ctrl>+<alt>+y"
 ## Options
 ```bash
 
-python3 dictation.py [-h] [-m MODEL_NAME] [-k KEY_COMBO] [-d DOUBLE_KEY] [-t MAX_TIME] [-v DEVICE] [-c COMPUTE_TYPE]
+python3 dictation.py [-h] [-m MODEL_NAME] [-k KEY_COMBO] [-d DOUBLE_KEY] [-t MAX_TIME] [-v DEVICE] [-c COMPUTE_TYPE] [-l LANGUAGE]
 
   -h, --help            show this help message and exit
   -m MODEL_NAME, --model-name MODEL_NAME
@@ -91,6 +91,10 @@ python3 dictation.py [-h] [-m MODEL_NAME] [-k KEY_COMBO] [-d DOUBLE_KEY] [-t MAX
   -c COMPUTE_TYPE, --compute-type COMPUTE_TYPE
                         If your GPU stack supports it, you can set compute-type to 'float32' or 'float16' to improve accuracy.
                         Default 'int8'
+  -l LANGUAGE, --language LANGUAGE
+                        Force a specific language for transcription (e.g., 'nl' for Dutch, 'en' for English). This improves accuracy
+                        especially for short audio fragments where auto-detection can fail. If not specified, language will be
+                        auto-detected. Common codes: nl (Dutch), en (English), fr (French), de (German), es (Spanish).
 ```
 
 
