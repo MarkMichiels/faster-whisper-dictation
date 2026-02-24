@@ -388,25 +388,75 @@ class KeyListener():
             h.join()
 
 
-class DoubleKeyListener():
-    def __init__(self, activate_callback, deactivate_callback, key=keyboard.Key.cmd_r):
+class MultiTapKeyListener():
+    """Detect single, double, and triple taps on a modifier key.
+
+    - Single tap  → deactivate_callback (stop recording, instant)
+    - Double tap  → activate_callback (start recording, ~0.5s delay)
+    - Triple tap  → toggle_language_callback (language switch, ~0.5s delay)
+    """
+
+    TAP_WINDOW = 0.5  # seconds to distinguish multi-tap sequences
+
+    def __init__(self, activate_callback, deactivate_callback,
+                 toggle_language_callback=None, key=keyboard.Key.cmd_r):
         self.activate_callback = activate_callback
         self.deactivate_callback = deactivate_callback
+        self.toggle_language_callback = toggle_language_callback
         self.key = key
         self.last_press_time = 0
+        self.tap_count = 0
+        self._tap_timer = None
+
+    def _key_matches(self, key):
+        """Check if pressed key matches target, handling Key enum vs KeyCode."""
+        if key == self.key:
+            return True
+        # pynput Listener gives Key enum, HotKey.parse gives KeyCode — compare vk
+        def get_vk(k):
+            if hasattr(k, 'vk'):
+                return k.vk
+            if hasattr(k, 'value') and hasattr(k.value, 'vk'):
+                return k.value.vk
+            return None
+        a, b = get_vk(key), get_vk(self.key)
+        return a is not None and a == b
 
     def on_press(self, key):
-        if key == keyboard.Key.ctrl_r:
+        if self._key_matches(key):
             current_time = time.time()
-            is_dbl_click = current_time - self.last_press_time < 0.5
-            self.last_press_time = current_time
-            if is_dbl_click:
-                return self.activate_callback()
+            if current_time - self.last_press_time < self.TAP_WINDOW:
+                self.tap_count += 1
             else:
+                self.tap_count = 1
+            self.last_press_time = current_time
+
+            if self.tap_count >= 2:
+                # Multi-tap in progress — schedule evaluation after window expires
+                if self._tap_timer is not None:
+                    self._tap_timer.cancel()
+                self._tap_timer = threading.Timer(
+                    self.TAP_WINDOW, self._evaluate_taps
+                )
+                self._tap_timer.start()
+            else:
+                # Single tap — immediate stop (no need to wait)
                 return self.deactivate_callback()
+
+    def _evaluate_taps(self):
+        """Called after tap window expires to determine action."""
+        count = self.tap_count
+        self.tap_count = 0
+        self._tap_timer = None
+
+        if count >= 3 and self.toggle_language_callback:
+            self.toggle_language_callback()
+        elif count >= 2:
+            self.activate_callback()
 
     def on_release(self, key):
         pass
+
     def run(self):
         with keyboard.Listener(
                 on_press=self.on_press,
@@ -550,6 +600,17 @@ class BatchApp():
         print('Timer stop')
         self.stop()
 
+    def toggle_language(self):
+        """Toggle transcription language between nl and en."""
+        current = self.transcriber.language
+        new_lang = 'en' if current == 'nl' else 'nl'
+        self.transcriber.language = new_lang
+        lang_name = 'English' if new_lang == 'en' else 'Nederlands'
+        print('[Language] Switched to %s (%s)' % (lang_name, new_lang))
+        # Audio feedback: two quick beeps (distinct from single start/stop beep)
+        self.beep("start_recording", wait=True)
+        self.beep("start_recording", wait=False)
+
     def toggle(self):
         return self.start() or self.stop()
 
@@ -563,8 +624,8 @@ class BatchApp():
 
         if (platform.system() != 'Windows' and not self.args.key_combo) or self.args.double_key:
             key = self.args.double_key or (platform.system() == 'Linux' and '<ctrl_r>') or '<cmd_r>'
-            keylistener= DoubleKeyListener(self.start, self.stop, normalize_key_names(key, parse=True))
-            self.m.on_enter_READY(lambda *_: print("Double tap ", key, " to start recording. Tap again to stop recording"))
+            keylistener = MultiTapKeyListener(self.start, self.stop, self.toggle_language, normalize_key_names(key, parse=True))
+            self.m.on_enter_READY(lambda *_: print("Double tap ", key, " to start recording. Tap again to stop recording. Triple tap to toggle language."))
         else:
             key = self.args.key_combo or '<win>+z'
             keylistener= KeyListener(self.toggle, normalize_key_names(key))
@@ -695,6 +756,17 @@ class App():
         print('Timer stop')
         self._auto_stop()
 
+    def toggle_language(self):
+        """Toggle transcription language between nl and en."""
+        current = self.transcription_worker.language
+        new_lang = 'en' if current == 'nl' else 'nl'
+        self.transcription_worker.language = new_lang
+        lang_name = 'English' if new_lang == 'en' else 'Nederlands'
+        print('[Language] Switched to %s (%s)' % (lang_name, new_lang))
+        # Audio feedback: two quick beeps (distinct from single start/stop beep)
+        self.beep("start_recording", wait=True)
+        self.beep("start_recording", wait=False)
+
     def toggle(self):
         return self.start() or self.stop()
 
@@ -750,12 +822,13 @@ class App():
             return k
 
         auto_stop_info = ', auto-stop after %ds silence' % self.args.auto_stop_silence if self.args.auto_stop_silence else ', no auto-stop'
-        print('Streaming dictation mode (chunk silence: %dms%s)' % (self.args.silence_ms, auto_stop_info))
+        lang_info = self.args.language or 'auto-detect'
+        print('Streaming dictation mode (chunk silence: %dms%s, language: %s)' % (self.args.silence_ms, auto_stop_info, lang_info))
 
         if (platform.system() != 'Windows' and not self.args.key_combo) or self.args.double_key:
             key = self.args.double_key or (platform.system() == 'Linux' and '<ctrl_r>') or '<cmd_r>'
-            keylistener = DoubleKeyListener(self.start, self.stop, normalize_key_names(key, parse=True))
-            print("Double tap ", key, " to start recording. Tap again to stop recording")
+            keylistener = MultiTapKeyListener(self.start, self.stop, self.toggle_language, normalize_key_names(key, parse=True))
+            print("Double tap ", key, " to start recording. Tap again to stop recording. Triple tap to toggle language.")
         else:
             key = self.args.key_combo or '<win>+z'
             keylistener = KeyListener(self.toggle, normalize_key_names(key))
