@@ -2,6 +2,12 @@
 # GPU-Accelerated Dictation for Desktop AI Workstation
 # RTX 5070 Ti with large-v3 model
 
+# Prevent duplicate instances
+if pgrep -f "dictation.py.*large-v3" > /dev/null 2>&1; then
+    echo "Dictation already running (PID $(pgrep -f 'dictation.py.*large-v3')), exiting."
+    exit 0
+fi
+
 # Navigate to the script's directory to ensure paths are correct.
 cd "$(dirname "$0")"
 
