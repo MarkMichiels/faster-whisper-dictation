@@ -581,11 +581,12 @@ class BatchApp():
 
     def start(self):
         if self.m.is_READY():
-            self.beep("start_recording")
+            # Start recording BEFORE beep so no audio is missed
             if self.args.max_time:
                 self.timer = threading.Timer(self.args.max_time, self.timer_stop)
                 self.timer.start()
             self.m.start_recording()
+            self.beep("start_recording", wait=False)
             return True
 
     def stop(self):
@@ -693,10 +694,7 @@ class App():
                 except queue.Empty:
                     break
 
-        self.beep("start_recording")
-        print('Recording (streaming mode) ...')
-
-        # Create fresh recorder
+        # Create fresh recorder and start BEFORE beep so no audio is missed
         self.recorder = StreamingRecorder(
             self.transcription_queue,
             silence_ms=self.args.silence_ms,
@@ -704,6 +702,9 @@ class App():
             on_auto_stop=self._auto_stop,
         )
         self.recorder.start()
+
+        self.beep("start_recording", wait=False)
+        print('Recording (streaming mode) ...')
 
         # Start transcription and typing threads
         self._transcription_thread = threading.Thread(
