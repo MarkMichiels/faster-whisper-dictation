@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=Faster Whisper Dictation
+Comment=GPU-accelerated Dutch speech-to-text with large-v3 model
+Exec=/home/mark/Repositories/faster-whisper-dictation/start_dictation.sh
+Terminal=false
+Hidden=false
+X-GNOME-Autostart-enabled=true
+X-systemd-skip=true
+StartupNotify=false

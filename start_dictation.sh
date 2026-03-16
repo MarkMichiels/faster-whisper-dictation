@@ -1,10 +1,10 @@
 #!/bin/bash
 # GPU-Accelerated Dictation for Desktop AI Workstation
-# RTX 5070 Ti with large-v3 model
+# Uses large-v3 model with CUDA acceleration
 
-# Prevent duplicate instances
-if pgrep -f "dictation.py.*large-v3" > /dev/null 2>&1; then
-    echo "Dictation already running (PID $(pgrep -f 'dictation.py.*large-v3')), exiting."
+# Prevent duplicate instances (match any dictation.py process)
+if pgrep -f "python.*dictation\.py" > /dev/null 2>&1; then
+    echo "Dictation already running (PID $(pgrep -f 'python.*dictation\.py')), exiting."
     exit 0
 fi
 
@@ -15,4 +15,4 @@ cd "$(dirname "$0")"
 source venv/bin/activate
 
 # Start with GPU acceleration, streaming mode, no hard time limit
-python3 dictation.py -m large-v3 -v cuda -c float16 -l nl -t 0
+exec python3 dictation.py -m large-v3 -v cuda -c float16 -l nl -t 0
