@@ -25,12 +25,38 @@ if platform.system() == 'Windows':
         return data
 else:
     import soundfile as sf
-    import sounddevice # or pygame.mixer, py-simple-audio
-    sounddevice.default.samplerate = 44100
+    import sounddevice
+
     def playsound(s, wait=True):
-        sounddevice.play(s) # samplerate=16000
+        """Play sound on a dedicated OutputStream so concurrent beeps don't cancel each other."""
+        done = threading.Event()
+        pos = [0]
+
+        def callback(outdata, frames, time_info, status):
+            end = pos[0] + frames
+            chunk = s[pos[0]:end]
+            if len(chunk) < frames:
+                outdata[:len(chunk)] = chunk
+                outdata[len(chunk):] = 0
+                done.set()
+                raise sounddevice.CallbackStop
+            outdata[:] = chunk
+            pos[0] = end
+
+        channels = s.shape[1] if s.ndim > 1 else 1
+        stream = sounddevice.OutputStream(
+            samplerate=44100, channels=channels,
+            callback=callback, blocksize=1024,
+            finished_callback=done.set
+        )
+        stream.start()
         if wait:
-            sounddevice.wait()
+            done.wait()
+            stream.close()
+        else:
+            # Fire-and-forget: clean up after playback finishes
+            threading.Thread(target=lambda: (done.wait(), stream.close()), daemon=True).start()
+
     def loadwav(filename):
         data, fs = sf.read(filename, dtype='float32')
         return data
