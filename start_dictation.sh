@@ -8,6 +8,11 @@ if pgrep -f "python.*dictation\.py" > /dev/null 2>&1; then
     exit 0
 fi
 
+# Ensure DISPLAY is set (needed for pynput keyboard listener).
+# When launched via .desktop autostart, GNOME sets this automatically.
+# When launched via SSH/Sero, it must be provided.
+export DISPLAY="${DISPLAY:-:1}"
+
 # Navigate to the script's directory to ensure paths are correct.
 cd "$(dirname "$0")"
 
