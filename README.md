@@ -186,21 +186,16 @@ python3 dictation.py [-h] [-m MODEL_NAME] [-k KEY_COMBO] [-d DOUBLE_KEY]
 
 ## Autostart on login (Linux)
 
-Create `~/.config/autostart/faster-whisper-dictation.desktop`:
+Run the included install script:
 
-```ini
-[Desktop Entry]
-Type=Application
-Name=Faster Whisper Dictation
-Comment=Start speech recognition on login
-Exec=/bin/bash -c "cd /home/YOUR_USER/Repositories/faster-whisper-dictation && source venv/bin/activate && python3 dictation.py -m large-v3 -v cuda -c float16 -l nl -t 0"
-Terminal=false
-Hidden=false
-X-GNOME-Autostart-enabled=true
-StartupNotify=false
+```bash
+./install.sh
 ```
 
-Replace `YOUR_USER` with your username and adjust the model/device/language options.
+This copies `faster-whisper-dictation.desktop` into `~/.config/autostart/` with the correct
+settings, including `X-systemd-skip=true` to prevent Ubuntu's `systemd-xdg-autostart-generator`
+from creating a duplicate service (GNOME session and systemd both process `.desktop` files in
+`~/.config/autostart/`, which causes two instances to launch without this flag).
 
 ## Installation on a new machine (step by step)
 
@@ -213,33 +208,18 @@ sudo apt install portaudio19-dev xdotool xclip git python3-venv
 
 # 2. Clone and setup
 cd ~/Repositories  # or wherever you keep repos
-git clone https://github.com/doctorguile/faster-whisper-dictation.git
+git clone https://github.com/MarkMichiels/faster-whisper-dictation.git
 cd faster-whisper-dictation
-python3 -m venv venv
-source venv/bin/activate
 
-# 3. Install Python packages
-pip3 install -r requirements.txt
+# 3. Install (creates venv, installs deps, sets up autostart)
+./install.sh
 
 # 4. (GPU only) If torch doesn't detect CUDA, reinstall with CUDA support:
+source venv/bin/activate
 pip3 install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121
 
 # 5. Test run
 python3 dictation.py -m large-v3 -v cuda -c float16 -l nl -t 0
-
-# 6. (Optional) Create autostart entry
-mkdir -p ~/.config/autostart
-cat > ~/.config/autostart/faster-whisper-dictation.desktop << 'EOF'
-[Desktop Entry]
-Type=Application
-Name=Faster Whisper Dictation
-Comment=Start speech recognition on login
-Exec=/bin/bash -c "cd $HOME/Repositories/faster-whisper-dictation && source venv/bin/activate && python3 dictation.py -m large-v3 -v cuda -c float16 -l nl -t 0"
-Terminal=false
-Hidden=false
-X-GNOME-Autostart-enabled=true
-StartupNotify=false
-EOF
 ```
 
 The first run will download the Whisper model from Hugging Face (~3GB for large-v3).
