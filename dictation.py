@@ -422,7 +422,7 @@ class MultiTapKeyListener():
     - Single tap   → deactivate_callback (stop recording, instant)
     - Double tap   → activate_callback (start recording, instant)
 
-    Ctrl_L (optional):
+    AltGr (optional):
     - Double tap   → toggle_language_callback
     """
 
@@ -665,7 +665,8 @@ class BatchApp():
 
         if (platform.system() != 'Windows' and not self.args.key_combo) or self.args.double_key:
             key = self.args.double_key or (platform.system() == 'Linux' and '<ctrl_r>') or '<cmd_r>'
-            lang_key = keyboard.Key.ctrl_l if platform.system() == 'Linux' else None
+            # AltGr sends vk=65027 (ISO_Level3_Shift), not Key.alt_gr (65406)
+            lang_key = keyboard.KeyCode.from_vk(65027) if platform.system() == 'Linux' else None
             keylistener = MultiTapKeyListener(
                 self.start, self.stop, self.toggle_language,
                 normalize_key_names(key, parse=True),
@@ -873,13 +874,14 @@ class App():
 
         if (platform.system() != 'Windows' and not self.args.key_combo) or self.args.double_key:
             key = self.args.double_key or (platform.system() == 'Linux' and '<ctrl_r>') or '<cmd_r>'
-            lang_key = keyboard.Key.ctrl_l if platform.system() == 'Linux' else None
+            # AltGr sends vk=65027 (ISO_Level3_Shift), not Key.alt_gr (65406)
+            lang_key = keyboard.KeyCode.from_vk(65027) if platform.system() == 'Linux' else None
             keylistener = MultiTapKeyListener(
                 self.start, self.stop, self.toggle_language,
                 normalize_key_names(key, parse=True),
                 language_key=lang_key,
             )
-            print("Double tap ", key, " to start/stop. Double tap Ctrl_L to toggle language.")
+            print("Double tap ", key, " to start/stop. Double tap AltGr to toggle language.")
         else:
             key = self.args.key_combo or '<win>+z'
             keylistener = KeyListener(self.toggle, normalize_key_names(key))
