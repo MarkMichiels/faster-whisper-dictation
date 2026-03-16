@@ -6,8 +6,14 @@ Multilingual dictation app based on the Faster Whisper to provide accurate and e
 
 ## Quick start
 1. Run the app, switch to another application that accepts text input (editor, browser textarea, etc)
-2. Use the key combination to toggle dictation.
-Default to double-tapping right-cmd on macOS, right-super on Linux and Win+Z on Windows.
+2. Use the key combination to toggle dictation:
+
+| Action | Linux | macOS | Windows |
+|--------|-------|-------|---------|
+| **Start recording** | Double-tap `Ctrl_R` | Double-tap `Cmd_R` | `Win+Z` |
+| **Stop recording** | Single tap `Ctrl_R` | Single tap `Cmd_R` | `Win+Z` |
+| **Toggle language** | Double-tap `AltGr` | — | — |
+
 3. Start speaking. Text appears in real-time after each natural pause (~1 second of silence).
 4. When you stop speaking for 10 seconds, the session ends automatically (double beep).
    Or tap the key again to stop manually (single beep).
@@ -196,6 +202,91 @@ This copies `faster-whisper-dictation.desktop` into `~/.config/autostart/` with 
 settings, including `X-systemd-skip=true` to prevent Ubuntu's `systemd-xdg-autostart-generator`
 from creating a duplicate service (GNOME session and systemd both process `.desktop` files in
 `~/.config/autostart/`, which causes two instances to launch without this flag).
+
+### Updating an existing installation
+
+After `git pull`, re-run install to update the autostart entry:
+
+```bash
+cd ~/Repositories/faster-whisper-dictation
+git pull
+./install.sh
+pkill -f "dictation.py" && sleep 1 && nohup ./start_dictation.sh > /dev/null 2>&1 &
+```
+
+## Troubleshooting (Linux)
+
+### Dictation starts twice on login
+
+**Symptom:** Two `dictation.py` processes after login, double GPU memory usage.
+
+**Cause:** Ubuntu 24.04's `systemd-xdg-autostart-generator` reads `.desktop` files in
+`~/.config/autostart/` and creates systemd user services. GNOME session does the same
+independently, causing two instances.
+
+**Fix:** The `.desktop` file includes `X-systemd-skip=true` to block the systemd generator.
+Run `./install.sh` to apply. Verify with:
+
+```bash
+# Should show only ONE dictation.py process
+ps aux | grep "dictation.py"
+
+# Should NOT show a generated autostart service (only a transient scope is OK)
+systemctl --user list-unit-files | grep dictat
+```
+
+### Beep sounds delayed or missing
+
+**Symptom:** Start beep plays noticeably late, or doesn't play at all when
+starting and stopping quickly.
+
+**Root causes and fixes applied:**
+
+1. **Recording started after beep (fixed):** The beep used to play synchronously before
+   the recorder started, so speech during the beep was lost (visible as "..." at the start
+   of transcriptions). Now recording starts first, beep plays asynchronously.
+
+2. **sounddevice.play() global stream conflict (fixed):** `sd.play()` uses a single global
+   stream — a second `sd.play()` call kills the first sound. Now each beep gets its own
+   `OutputStream`, allowing concurrent playback.
+
+3. **500ms activation delay (fixed):** The original triple-tap detection waited 500ms after
+   double-tap to check for a third tap. Combined with ~130ms audio latency, total perceived
+   delay was 630ms+. Now double-tap fires instantly (no timer), and language toggle uses
+   a separate key (AltGr).
+
+4. **~100-150ms PipeWire latency (inherent):** Opening a PipeWire audio stream has ~50ms
+   overhead on first use. This is unavoidable without switching to direct ALSA.
+
+### Language toggles unexpectedly
+
+**Symptom:** Language switches to English/Dutch without pressing AltGr.
+
+**Cause (historical):** pynput sends a generic `Key.ctrl` event (vk=65507) alongside
+every `Key.ctrl_r` press. This generic event matched `Key.ctrl_l` because they share
+the same vk code. Fixed by filtering generic modifier events (`ctrl`, `alt`, `shift`)
+and using AltGr (unique vk=65027) instead of Ctrl_L for language toggle.
+
+### AltGr not detected
+
+**Note:** On Linux with X11, pynput reports AltGr as `KeyCode(vk=65027)`
+(ISO_Level3_Shift), not as `Key.alt_gr` (vk=65406). The code uses the actual
+vk code observed at runtime. If AltGr doesn't work on your keyboard layout,
+run the key sniffer to check:
+
+```bash
+cd ~/Repositories/faster-whisper-dictation
+source venv/bin/activate
+timeout 10 python3 -c "
+from pynput import keyboard
+def on_press(key):
+    vk = getattr(key, 'vk', None) or getattr(getattr(key, 'value', None), 'vk', None)
+    print(f'{key!r}  vk={vk}')
+with keyboard.Listener(on_press=on_press) as l: l.join()
+"
+```
+
+Then update the `lang_key = keyboard.KeyCode.from_vk(YOUR_VK)` line in `dictation.py`.
 
 ## Installation on a new machine (step by step)
 
