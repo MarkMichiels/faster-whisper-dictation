@@ -422,7 +422,8 @@ class MultiTapKeyListener():
     - Triple tap  → toggle_language_callback (language switch, ~0.5s delay)
     """
 
-    TAP_WINDOW = 0.5  # seconds to distinguish multi-tap sequences
+    TAP_WINDOW = 0.4  # seconds to distinguish multi-tap sequences
+    TRIPLE_TAP_GRACE = 0.3  # extra wait after double-tap to detect triple
 
     def __init__(self, activate_callback, deactivate_callback,
                  toggle_language_callback=None, key=keyboard.Key.cmd_r):
@@ -432,7 +433,8 @@ class MultiTapKeyListener():
         self.key = key
         self.last_press_time = 0
         self.tap_count = 0
-        self._tap_timer = None
+        self._triple_timer = None
+        self._activated = False  # track if double-tap already fired
 
     def _key_matches(self, key):
         """Check if pressed key matches target, handling Key enum vs KeyCode."""
@@ -455,30 +457,38 @@ class MultiTapKeyListener():
                 self.tap_count += 1
             else:
                 self.tap_count = 1
+                self._activated = False
             self.last_press_time = current_time
 
-            if self.tap_count >= 2:
-                # Multi-tap in progress — schedule evaluation after window expires
-                if self._tap_timer is not None:
-                    self._tap_timer.cancel()
-                self._tap_timer = threading.Timer(
-                    self.TAP_WINDOW, self._evaluate_taps
-                )
-                self._tap_timer.start()
-            else:
-                # Single tap — immediate stop (no need to wait)
+            if self.tap_count == 2 and not self._activated:
+                # Double-tap: activate IMMEDIATELY, no waiting
+                self._activated = True
+                self.activate_callback()
+                # Start grace timer to detect triple-tap for language toggle
+                if self.toggle_language_callback:
+                    if self._triple_timer is not None:
+                        self._triple_timer.cancel()
+                    self._triple_timer = threading.Timer(
+                        self.TRIPLE_TAP_GRACE, self._clear_taps
+                    )
+                    self._triple_timer.start()
+            elif self.tap_count >= 3 and self._activated:
+                # Triple-tap: stop + toggle language
+                if self._triple_timer is not None:
+                    self._triple_timer.cancel()
+                    self._triple_timer = None
+                self.deactivate_callback()
+                if self.toggle_language_callback:
+                    self.toggle_language_callback()
+                self._clear_taps()
+            elif self.tap_count == 1:
+                # Single tap — immediate stop
                 return self.deactivate_callback()
 
-    def _evaluate_taps(self):
-        """Called after tap window expires to determine action."""
-        count = self.tap_count
+    def _clear_taps(self):
+        """Reset tap state after grace period."""
         self.tap_count = 0
-        self._tap_timer = None
-
-        if count >= 3 and self.toggle_language_callback:
-            self.toggle_language_callback()
-        elif count >= 2:
-            self.activate_callback()
+        self._triple_timer = None
 
     def on_release(self, key):
         pass
