@@ -198,20 +198,37 @@ Run the included install script:
 ./install.sh
 ```
 
-This copies `faster-whisper-dictation.desktop` into `~/.config/autostart/` with the correct
-settings, including `X-systemd-skip=true` to prevent Ubuntu's `systemd-xdg-autostart-generator`
-from creating a duplicate service (GNOME session and systemd both process `.desktop` files in
-`~/.config/autostart/`, which causes two instances to launch without this flag).
+This installs a **systemd user service** (`spraakherkenning.service`) that starts
+dictation automatically on login. The service includes:
+
+- **Duplicate prevention** — kills orphan instances before starting (`ExecStartPre`)
+- **Restart on crash** — automatic restart after 5 seconds on failure
+- **CUDA library paths** — auto-detected from the venv
+- **DISPLAY forwarding** — for pynput hotkey listener on X11
+
+> **Note:** Previous versions used a `.desktop` file in `~/.config/autostart/`.
+> This caused duplicate instances because both GNOME session and systemd's
+> `xdg-autostart-generator` would each launch a copy. The install script
+> automatically removes any legacy `.desktop` autostart.
+
+### Managing the service
+
+```bash
+systemctl --user status spraakherkenning   # Check status
+systemctl --user restart spraakherkenning  # Restart after config change
+systemctl --user stop spraakherkenning     # Stop temporarily
+journalctl --user -u spraakherkenning -f   # Follow logs
+```
 
 ### Updating an existing installation
 
-After `git pull`, re-run install to update the autostart entry:
+After `git pull`, re-run install and restart:
 
 ```bash
 cd ~/Repositories/faster-whisper-dictation
 git pull
 ./install.sh
-pkill -f "dictation.py" && sleep 1 && nohup ./start_dictation.sh > /dev/null 2>&1 &
+systemctl --user restart spraakherkenning
 ```
 
 ## Troubleshooting (Linux)
@@ -220,19 +237,26 @@ pkill -f "dictation.py" && sleep 1 && nohup ./start_dictation.sh > /dev/null 2>&
 
 **Symptom:** Two `dictation.py` processes after login, double GPU memory usage.
 
-**Cause:** Ubuntu 24.04's `systemd-xdg-autostart-generator` reads `.desktop` files in
-`~/.config/autostart/` and creates systemd user services. GNOME session does the same
-independently, causing two instances.
+**Cause (historical):** Ubuntu 24.04 has multiple autostart mechanisms that can
+conflict. Specifically:
 
-**Fix:** The `.desktop` file includes `X-systemd-skip=true` to block the systemd generator.
-Run `./install.sh` to apply. Verify with:
+1. `.desktop` files in `~/.config/autostart/` are processed by **both** GNOME
+   session and systemd's `xdg-autostart-generator`, creating two instances.
+2. A separate systemd user service (`spraakherkenning.service`) would add yet
+   another instance if both mechanisms coexisted.
+
+**Fix:** Since March 2026, `install.sh` uses a **single systemd user service** as the
+only autostart mechanism. The `ExecStartPre` directive kills any orphan instances.
+Legacy `.desktop` autostart files are removed automatically.
+
+Verify with:
 
 ```bash
-# Should show only ONE dictation.py process
-ps aux | grep "dictation.py"
+# Should show exactly ONE dictation.py process
+ps aux | grep "dictation.py" | grep -v grep
 
-# Should NOT show a generated autostart service (only a transient scope is OK)
-systemctl --user list-unit-files | grep dictat
+# Should show the service running
+systemctl --user status spraakherkenning
 ```
 
 ### Beep sounds delayed or missing
@@ -302,15 +326,16 @@ cd ~/Repositories  # or wherever you keep repos
 git clone https://github.com/MarkMichiels/faster-whisper-dictation.git
 cd faster-whisper-dictation
 
-# 3. Install (creates venv, installs deps, sets up autostart)
+# 3. Install (creates venv, installs deps, enables systemd service)
 ./install.sh
 
 # 4. (GPU only) If torch doesn't detect CUDA, reinstall with CUDA support:
 source venv/bin/activate
 pip3 install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121
+systemctl --user restart spraakherkenning
 
-# 5. Test run
-python3 dictation.py -m large-v3 -v cuda -c float16 -l nl -t 0
+# 5. Verify
+systemctl --user status spraakherkenning
 ```
 
 The first run will download the Whisper model from Hugging Face (~3GB for large-v3).
