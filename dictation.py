@@ -331,6 +331,30 @@ class KeyboardReplayer():
     def __init__(self, callback=None):
         self.callback = callback
         self.kb = keyboard.Controller()
+        # Window-ID waar de dictatie begon — paste landt hier ook als focus tussendoor verschuift.
+        self.target_wid = None
+
+    def capture_target_window(self):
+        """Save active window at recording-start so paste lands here, even if focus drifts."""
+        try:
+            self.target_wid = subprocess.check_output(
+                ['xdotool', 'getactivewindow'], timeout=2
+            ).decode().strip()
+        except Exception:
+            self.target_wid = None
+
+    def _restore_target_window(self):
+        """Activate the recording-start window before paste (no-op if not captured)."""
+        if not self.target_wid:
+            return
+        try:
+            subprocess.run(
+                ['xdotool', 'windowactivate', '--sync', self.target_wid],
+                timeout=2, check=False, stderr=subprocess.DEVNULL,
+            )
+            time.sleep(0.05)
+        except Exception:
+            pass
 
     def _get_active_window_class(self):
         """Detect active window class via xprop (returns lowercase)."""
@@ -378,6 +402,7 @@ class KeyboardReplayer():
         if not text:
             return
         print(text)
+        self._restore_target_window()
         wm_class = self._get_active_window_class()
         if wm_class == 'kitty':
             print('[clipboard mode - kitty detected]')
@@ -626,6 +651,7 @@ class BatchApp():
                 self.timer = threading.Timer(self.args.max_time, self.timer_stop)
                 self.timer.start()
             self.m.start_recording()
+            self.replayer.capture_target_window()
             self.beep("start_recording", wait=False)
             return True
 
@@ -748,6 +774,7 @@ class App():
             on_auto_stop=self._auto_stop,
         )
         self.recorder.start()
+        self.replayer.capture_target_window()
 
         self.beep("start_recording", wait=False)
         print('Recording (streaming mode) ...')
