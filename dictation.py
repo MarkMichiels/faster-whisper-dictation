@@ -344,17 +344,31 @@ class KeyboardReplayer():
             self.target_wid = None
 
     def _restore_target_window(self):
-        """Activate the recording-start window before paste (no-op if not captured)."""
+        """Activate the recording-start window before paste (no-op if not captured).
+
+        Retries once if focus didn't actually land on the target (workspace switches,
+        focus-stealing prevention, or slow WM compositors can make --sync return before
+        focus is truly assigned). Without this, paste sometimes lands on the wrong window
+        even though the clipboard is filled correctly.
+        """
         if not self.target_wid:
             return
-        try:
-            subprocess.run(
-                ['xdotool', 'windowactivate', '--sync', self.target_wid],
-                timeout=2, check=False, stderr=subprocess.DEVNULL,
-            )
-            time.sleep(0.05)
-        except Exception:
-            pass
+        for attempt in range(2):
+            try:
+                subprocess.run(
+                    ['xdotool', 'windowactivate', '--sync', self.target_wid],
+                    timeout=2, check=False, stderr=subprocess.DEVNULL,
+                )
+                time.sleep(0.15)
+                active = subprocess.check_output(
+                    ['xdotool', 'getactivewindow'], timeout=2
+                ).decode().strip()
+                if active == self.target_wid:
+                    return
+            except Exception:
+                pass
+        print('[warn] target window %s did not regain focus — paste may land elsewhere'
+              % self.target_wid)
 
     def _get_active_window_class(self):
         """Detect active window class via xprop (returns lowercase)."""
