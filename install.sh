@@ -61,6 +61,10 @@ Environment=LD_LIBRARY_PATH=$LD_PATH
 # DISPLAY needed for pynput global hotkey listener (X11)
 Environment=DISPLAY=:1
 
+# Flush stdout per line so every transcription is immediately recoverable
+# from the journal (Python block-buffers stdout under systemd otherwise).
+Environment=PYTHONUNBUFFERED=1
+
 # Kill any orphan instances before starting
 ExecStartPre=/bin/bash -c 'pkill -f "python.*dictation\\\\.py" 2>/dev/null; sleep 0.5; true'
 
@@ -82,9 +86,11 @@ systemctl --user daemon-reload
 systemctl --user enable "$SERVICE_NAME.service"
 echo "Enabled: $SERVICE_NAME.service"
 
-# Start if not already running
+# Start, or restart if already running, so re-running install.sh always applies
+# the latest unit definition and pulled code (idempotent on every machine).
 if systemctl --user is-active --quiet "$SERVICE_NAME.service"; then
-    echo "Service already running. Use 'systemctl --user restart $SERVICE_NAME' to apply changes."
+    systemctl --user restart "$SERVICE_NAME.service"
+    echo "Restarted: $SERVICE_NAME.service (applied unit + code changes)"
 else
     systemctl --user start "$SERVICE_NAME.service"
     echo "Started: $SERVICE_NAME.service"
