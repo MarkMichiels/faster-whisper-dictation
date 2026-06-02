@@ -27,8 +27,11 @@ sudo apt install portaudio19-dev xdotool xclip
 ```
 
 - **portaudio19-dev** — required by PyAudio for microphone access
-- **xdotool** — used to detect the active window (for Kitty terminal clipboard mode)
-- **xclip** — used for clipboard-based text injection in Kitty terminal
+- **xdotool** — used to detect the active window and restore focus before paste
+- **xclip** — clipboard fallback for text injection when CopyQ is not installed
+- **copyq** *(optional, recommended)* — clipboard manager; when present, every
+  dictation is also stored in clipboard history, so it is recoverable even if
+  the paste fails
 
 ### System packages (macOS)
 
@@ -340,13 +343,34 @@ systemctl --user status spraakherkenning
 
 The first run will download the Whisper model from Hugging Face (~3GB for large-v3).
 
-## Kitty terminal support
+## Text injection (clipboard-first)
 
-When the active window is a Kitty terminal, text is injected via clipboard
-(Ctrl+Shift+V) instead of character-by-character typing. This works around
-a known Kitty bug with XTest keyboard simulation on AZERTY keyboards.
+Transcribed text is injected **clipboard-first for every application**: the text
+is placed on the clipboard (via CopyQ, falling back to xclip) and pasted with a
+single shortcut — `Ctrl+Shift+V` in terminals, `Ctrl+V` in GUI apps. The active
+window is detected automatically; no configuration needed.
 
-This is detected automatically — no configuration needed.
+Why clipboard-first instead of character-by-character typing:
+
+- **Recoverable** — with CopyQ installed, every dictation lands in clipboard
+  history, so it is never lost even if the paste keystroke fails or focus drifts.
+- **Reliable** — one atomic paste instead of hundreds of synthetic keystrokes
+  greatly reduces dropped characters and focus-drift corruption.
+- **Works around the Kitty bug** — bypasses Kitty's XTest shift bug on AZERTY
+  keyboards (the original reason clipboard mode was added for terminals).
+
+Per-key typing via pynput remains only as a last-resort fallback when no
+clipboard tool is available; it logs how many characters failed instead of
+swallowing errors silently.
+
+### Recovering a lost dictation
+
+Every transcription is logged to the systemd journal (the service runs with
+`PYTHONUNBUFFERED=1` so entries appear immediately):
+
+```bash
+journalctl --user -u spraakherkenning -t python3 | grep '\[transcribe\]'
+```
 
 ## Replace macOS default dictation trigger key
 You can use this app to replace macOS built-in dictation. i.e. Double tap Right Cmd key to begin recording and stop recording with a single tap

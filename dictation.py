@@ -388,41 +388,85 @@ class KeyboardReplayer():
         except:
             return ''
 
-    def _type_via_clipboard(self, text):
-        """Inject text via xclip clipboard + Ctrl+Shift+V paste.
-        Bypasses Kitty XTest shift bug (#2261) on AZERTY keyboards."""
-        p = subprocess.Popen(['xclip', '-selection', 'clipboard'],
-                             stdin=subprocess.PIPE)
-        p.communicate(text.encode('utf-8'))
-        time.sleep(0.05)
+    # Terminals paste with Ctrl+Shift+V; GUI apps with Ctrl+V.
+    TERMINAL_CLASSES = {'kitty', 'gnome-terminal', 'konsole', 'xterm',
+                        'alacritty', 'terminator', 'st', 'wezterm', 'tilix',
+                        'urxvt', 'rxvt'}
+
+    def _set_clipboard(self, text):
+        """Place text on the system clipboard AND into CopyQ history.
+
+        Clipboard-first injection: doing this for every app guarantees the
+        dictation lands in clipboard history (so it is recoverable even if the
+        paste keystroke fails) and lets us paste atomically instead of typing
+        character-by-character. CopyQ is preferred because it records history;
+        xclip is the fallback when CopyQ is unavailable. Returns True on success.
+
+        Note: 'copyq copy' sets the clipboard but the monitor skips its own
+        writes, so it never reaches history; 'copyq add' records history but
+        leaves the clipboard untouched. Both are needed — add for recovery,
+        copy for the paste.
+        """
+        try:
+            subprocess.run(['copyq', 'add', '--', text], timeout=3,
+                           check=True, stderr=subprocess.DEVNULL)
+            subprocess.run(['copyq', 'copy', '--', text], timeout=3,
+                           check=True, stderr=subprocess.DEVNULL)
+            time.sleep(0.05)
+            return True
+        except Exception:
+            pass
+        try:
+            p = subprocess.Popen(['xclip', '-selection', 'clipboard'],
+                                 stdin=subprocess.PIPE)
+            p.communicate(text.encode('utf-8'), timeout=3)
+            time.sleep(0.05)
+            return True
+        except Exception:
+            return False
+
+    def _send_paste(self, terminal):
+        """Send the paste shortcut: Ctrl+Shift+V in terminals, Ctrl+V elsewhere."""
         self.kb.press(keyboard.Key.ctrl)
-        self.kb.press(keyboard.Key.shift)
+        if terminal:
+            self.kb.press(keyboard.Key.shift)
         self.kb.press('v')
         self.kb.release('v')
-        self.kb.release(keyboard.Key.shift)
+        if terminal:
+            self.kb.release(keyboard.Key.shift)
         self.kb.release(keyboard.Key.ctrl)
 
     def _type_via_pynput(self, text):
-        """Original character-by-character typing via pynput (works in GUI apps)."""
+        """Last-resort character-by-character typing via pynput.
+
+        Only used when no clipboard tool is available. Logs how many characters
+        failed instead of swallowing every error silently, so dropped dictation
+        is visible in the journal rather than vanishing without a trace.
+        """
+        failures = 0
         for element in text:
             try:
                 self.kb.type(element)
                 time.sleep(0.0025)
-            except:
-                pass
+            except Exception:
+                failures += 1
+        if failures:
+            print('[pynput] %d/%d characters failed to type' % (failures, len(text)))
 
     def type_text(self, text):
-        """Type a text string using the appropriate method for the active window."""
+        """Inject text into the active window, clipboard-first for every app."""
         if not text:
             return
         print(text)
         self._restore_target_window()
         wm_class = self._get_active_window_class()
-        if wm_class == 'kitty':
-            print('[clipboard mode - kitty detected]')
-            self._type_via_clipboard(text)
+        terminal = wm_class in self.TERMINAL_CLASSES
+        if self._set_clipboard(text):
+            print('[clipboard mode - %s%s]'
+                  % (wm_class or 'unknown', ', terminal' if terminal else ''))
+            self._send_paste(terminal)
         else:
-            print('[pynput mode - %s]' % (wm_class or 'unknown'))
+            print('[pynput fallback - %s - no clipboard tool]' % (wm_class or 'unknown'))
             self._type_via_pynput(text)
 
     def replay(self, event):
