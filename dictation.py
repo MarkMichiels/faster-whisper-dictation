@@ -173,16 +173,12 @@ class StreamingRecorder:
             speech_pad_ms=200,
         )
 
-        # Fine-grained VAD used only to locate a safe split point inside an
-        # ongoing turn. Its shorter min_silence (eager_pause_ms) catches the
-        # brief between-word/breath pauses the main VAD intentionally ignores,
-        # so eager cuts still land on a real word boundary, never mid-word.
-        self.fine_vad_options = VadOptions(
-            threshold=0.5,
-            min_speech_duration_ms=200,
-            min_silence_duration_ms=eager_pause_ms,
-            speech_pad_ms=80,
-        )
+        # Fine-grained VAD ladder used to locate a split point inside an ongoing
+        # turn. We try the configured eager_pause_ms first (nicest, clearest
+        # pause) and fall back to shorter between-word gaps if fluent speech has
+        # no longer pause — so a fast, unbroken talker still gets cut.
+        self.eager_pause_ms = eager_pause_ms
+        self._pause_ladder_ms = sorted({eager_pause_ms, 150, 80}, reverse=True)
 
         # Track how many samples we already processed in the VAD thread
         self._vad_processed_samples = 0
@@ -358,42 +354,51 @@ class StreamingRecorder:
         self._vad_processed_samples -= drop_frames * self.FRAMES_PER_BUFFER
 
     def _find_split_point(self, audio, start, hard_end):
-        """Locate a safe split point inside audio[start:hard_end].
+        """Locate a split point inside audio[start:hard_end].
 
-        Runs the fine-grained VAD over the unsent window and returns the
-        midpoint of the latest between-speech gap that yields a chunk between
-        min_chunk_samples and max_chunk_samples long — i.e. cut as late as
-        allowed (most context for Whisper) but never shorter than the floor.
-        Returns an absolute sample index, or None when no gap qualifies (e.g.
-        truly unbroken speech) — then we wait rather than cut mid-word.
+        Walks a ladder of ever-shorter pauses: first the configured
+        eager_pause_ms (clearest pause), then shorter between-word gaps, so a
+        fluent talker whose pauses are all <eager_pause_ms still gets cut. As a
+        last resort, when the window has reached the ceiling and no pause is
+        found at all, cut hard at the ceiling rather than stall indefinitely.
+        Returns an absolute sample index, or None to keep waiting (window still
+        below the ceiling and no pause yet). Prefers the latest qualifying pause
+        within the ceiling (most context for Whisper).
         """
         window = audio[start:hard_end]
-        if len(window) < self.SAMPLE_RATE * 0.5:
+        win_len = len(window)
+        if win_len < self.SAMPLE_RATE * 0.5:
             return None
 
-        fine_ts = get_speech_timestamps(window, self.fine_vad_options,
-                                        sampling_rate=self.SAMPLE_RATE)
-        if len(fine_ts) < 2:
-            # Need a gap between two speech runs to split safely
-            return None
+        upper = self.max_chunk_samples or win_len
 
-        upper = self.max_chunk_samples or (hard_end - start)
-        candidates = [
-            (fine_ts[i]['end'] + fine_ts[i + 1]['start']) // 2
-            for i in range(len(fine_ts) - 1)
-            if (fine_ts[i]['end'] + fine_ts[i + 1]['start']) // 2 >= self.min_chunk_samples
-        ]
-        if not candidates:
-            return None          # only sub-floor pauses so far — wait
+        for min_sil_ms in self._pause_ladder_ms:
+            opts = VadOptions(threshold=0.5, min_speech_duration_ms=150,
+                              min_silence_duration_ms=min_sil_ms, speech_pad_ms=50)
+            fine_ts = get_speech_timestamps(window, opts, sampling_rate=self.SAMPLE_RATE)
+            if len(fine_ts) < 2:
+                continue
+            candidates = [
+                (fine_ts[i]['end'] + fine_ts[i + 1]['start']) // 2
+                for i in range(len(fine_ts) - 1)
+                if (fine_ts[i]['end'] + fine_ts[i + 1]['start']) // 2 >= self.min_chunk_samples
+            ]
+            if not candidates:
+                continue
+            within = [g for g in candidates if g <= upper]
+            chosen = within[-1] if within else candidates[0]
+            print('[VAD] split @ %.1fs via %dms-pause (%d speech runs in %.1fs)'
+                  % ((start + chosen) / self.SAMPLE_RATE, min_sil_ms, len(fine_ts),
+                     win_len / self.SAMPLE_RATE))
+            return start + chosen
 
-        # Prefer the latest pause within the ceiling (most context for
-        # Whisper). If every qualifying pause is past the ceiling — a turn
-        # spoken faster than max_chunk_s without a >=eager_pause_ms gap — fall
-        # back to the earliest one so we still cut and keep making progress
-        # instead of stalling until the speaker finally pauses for >=1s.
-        within = [g for g in candidates if g <= upper]
-        chosen = within[-1] if within else candidates[0]
-        return start + chosen
+        # No pause found anywhere on the ladder. Only cut once the window has
+        # reached the ceiling — then a hard cut beats waiting forever.
+        if win_len >= upper:
+            print('[VAD] hard cut @ %.1fs (no pause in %.1fs of speech)'
+                  % ((start + upper) / self.SAMPLE_RATE, win_len / self.SAMPLE_RATE))
+            return start + upper
+        return None
 
 
 class TranscriptionWorker:
