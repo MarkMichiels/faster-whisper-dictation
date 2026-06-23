@@ -336,7 +336,26 @@ class StreamingRecorder:
                         self.transcription_queue.put(chunk)
                     self._vad_processed_samples = split
 
+        self._trim_buffer()
         return False
+
+    def _trim_buffer(self):
+        """Drop fully-processed frames so VAD cost and memory stay flat over a
+        long turn instead of growing with session length (the VAD re-scans the
+        whole buffer every tick). Buffer and processed-marker shift together by
+        the same whole-frame amount, so every index stays relative to the
+        current buffer and the rest of the pipeline is unaffected.
+        """
+        drop_frames = self._vad_processed_samples // self.FRAMES_PER_BUFFER
+        if drop_frames <= 0:
+            return
+        with self._buffer_lock:
+            # Keep at least the last frame; never outrun the recording thread.
+            drop_frames = min(drop_frames, len(self._raw_frames) - 1)
+            if drop_frames <= 0:
+                return
+            del self._raw_frames[:drop_frames]
+        self._vad_processed_samples -= drop_frames * self.FRAMES_PER_BUFFER
 
     def _find_split_point(self, audio, start, hard_end):
         """Locate a safe split point inside audio[start:hard_end].
@@ -359,19 +378,22 @@ class StreamingRecorder:
             return None
 
         upper = self.max_chunk_samples or (hard_end - start)
-        best = None
-        for i in range(len(fine_ts) - 1):
-            gap_mid = (fine_ts[i]['end'] + fine_ts[i + 1]['start']) // 2
-            if gap_mid < self.min_chunk_samples:
-                continue          # chunk would be too short — keep looking
-            if gap_mid <= upper:
-                best = gap_mid    # latest acceptable pause so far
-            else:
-                break             # past the upper bound — stop
+        candidates = [
+            (fine_ts[i]['end'] + fine_ts[i + 1]['start']) // 2
+            for i in range(len(fine_ts) - 1)
+            if (fine_ts[i]['end'] + fine_ts[i + 1]['start']) // 2 >= self.min_chunk_samples
+        ]
+        if not candidates:
+            return None          # only sub-floor pauses so far — wait
 
-        if best is None:
-            return None
-        return start + best
+        # Prefer the latest pause within the ceiling (most context for
+        # Whisper). If every qualifying pause is past the ceiling — a turn
+        # spoken faster than max_chunk_s without a >=eager_pause_ms gap — fall
+        # back to the earliest one so we still cut and keep making progress
+        # instead of stalling until the speaker finally pauses for >=1s.
+        within = [g for g in candidates if g <= upper]
+        chosen = within[-1] if within else candidates[0]
+        return start + chosen
 
 
 class TranscriptionWorker:
