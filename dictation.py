@@ -8,7 +8,7 @@ import subprocess
 import pyaudio
 import numpy as np
 from faster_whisper import WhisperModel
-from faster_whisper.vad import get_speech_timestamps, VadOptions
+from faster_whisper.vad import get_speech_timestamps, VadOptions, get_vad_model
 from pynput import keyboard
 from transitions import Machine
 
@@ -143,9 +143,11 @@ class StreamingRecorder:
     SAMPLE_RATE = 16000
     FRAMES_PER_BUFFER = 1024
 
+    SPEECH_FRAME = 512  # Silero VAD analyses audio in 512-sample (~32ms) frames
+
     def __init__(self, transcription_queue, silence_ms=1000,
                  auto_stop_silence_s=10, on_auto_stop=None,
-                 min_chunk_s=2.5, max_chunk_s=10, eager_pause_ms=300):
+                 min_chunk_s=2.5, max_chunk_s=10, eager_prob=0.35):
         self.transcription_queue = transcription_queue
         self.silence_ms = silence_ms
         self.auto_stop_silence_s = auto_stop_silence_s
@@ -173,12 +175,13 @@ class StreamingRecorder:
             speech_pad_ms=200,
         )
 
-        # Fine-grained VAD ladder used to locate a split point inside an ongoing
-        # turn. We try the configured eager_pause_ms first (nicest, clearest
-        # pause) and fall back to shorter between-word gaps if fluent speech has
-        # no longer pause — so a fast, unbroken talker still gets cut.
-        self.eager_pause_ms = eager_pause_ms
-        self._pause_ladder_ms = sorted({eager_pause_ms, 150, 80}, reverse=True)
+        # Eager split is chosen statistically: within the allowed window we cut
+        # at the quietest moment (lowest Silero speech probability). If that
+        # quietest point is below eager_prob it's a real pause → cut early; once
+        # the window hits the ceiling we cut at the quietest point regardless,
+        # so a fluent unbroken talker still gets cut on the best boundary
+        # available rather than mid-word or not at all.
+        self.eager_prob = eager_prob
 
         # Track how many samples we already processed in the VAD thread
         self._vad_processed_samples = 0
@@ -327,7 +330,7 @@ class StreamingRecorder:
                     chunk = audio[self._vad_processed_samples:split]
                     if len(chunk) > self.SAMPLE_RATE * 0.1:
                         duration = len(chunk) / self.SAMPLE_RATE
-                        print('[VAD] Eager chunk: %.1fs (micro-pause, samples %d-%d)'
+                        print('[VAD] Eager chunk: %.1fs (samples %d-%d)'
                               % (duration, self._vad_processed_samples, split))
                         self.transcription_queue.put(chunk)
                     self._vad_processed_samples = split
@@ -353,17 +356,25 @@ class StreamingRecorder:
             del self._raw_frames[:drop_frames]
         self._vad_processed_samples -= drop_frames * self.FRAMES_PER_BUFFER
 
-    def _find_split_point(self, audio, start, hard_end):
-        """Locate a split point inside audio[start:hard_end].
+    def _speech_probs(self, audio):
+        """Per-frame Silero speech probability for audio (one value per
+        SPEECH_FRAME samples, ~32ms). Low = silence, high = speech. One forward
+        pass — cheaper than running get_speech_timestamps repeatedly."""
+        model = get_vad_model()
+        frame = self.SPEECH_FRAME
+        pad = (frame - len(audio) % frame) % frame
+        padded = np.pad(audio, (0, pad)) if pad else audio
+        return np.asarray(model(padded.reshape(1, -1)).squeeze(0)).reshape(-1)
 
-        Walks a ladder of ever-shorter pauses: first the configured
-        eager_pause_ms (clearest pause), then shorter between-word gaps, so a
-        fluent talker whose pauses are all <eager_pause_ms still gets cut. As a
-        last resort, when the window has reached the ceiling and no pause is
-        found at all, cut hard at the ceiling rather than stall indefinitely.
-        Returns an absolute sample index, or None to keep waiting (window still
-        below the ceiling and no pause yet). Prefers the latest qualifying pause
-        within the ceiling (most context for Whisper).
+    def _find_split_point(self, audio, start, hard_end):
+        """Locate a split point inside audio[start:hard_end] statistically.
+
+        Within the allowed range [min_chunk_samples, ceiling] pick the quietest
+        moment (lowest smoothed speech probability) and cut there when either it
+        is a genuine pause (prob <= eager_prob) or the window has reached the
+        ceiling (then cut at the quietest point regardless — best boundary
+        available beats waiting). Returns an absolute sample index, or None to
+        keep waiting (still below the ceiling and no quiet-enough point yet).
         """
         window = audio[start:hard_end]
         win_len = len(window)
@@ -371,33 +382,31 @@ class StreamingRecorder:
             return None
 
         upper = self.max_chunk_samples or win_len
+        frame = self.SPEECH_FRAME
 
-        for min_sil_ms in self._pause_ladder_ms:
-            opts = VadOptions(threshold=0.5, min_speech_duration_ms=150,
-                              min_silence_duration_ms=min_sil_ms, speech_pad_ms=50)
-            fine_ts = get_speech_timestamps(window, opts, sampling_rate=self.SAMPLE_RATE)
-            if len(fine_ts) < 2:
-                continue
-            candidates = [
-                (fine_ts[i]['end'] + fine_ts[i + 1]['start']) // 2
-                for i in range(len(fine_ts) - 1)
-                if (fine_ts[i]['end'] + fine_ts[i + 1]['start']) // 2 >= self.min_chunk_samples
-            ]
-            if not candidates:
-                continue
-            within = [g for g in candidates if g <= upper]
-            chosen = within[-1] if within else candidates[0]
-            print('[VAD] split @ %.1fs via %dms-pause (%d speech runs in %.1fs)'
-                  % ((start + chosen) / self.SAMPLE_RATE, min_sil_ms, len(fine_ts),
+        probs = self._speech_probs(window)
+        if len(probs) >= 3:  # smooth ~96ms so a single noisy frame isn't a false dip
+            probs = np.convolve(probs, np.ones(3) / 3, mode='same')
+
+        lo = int(self.min_chunk_samples // frame)
+        hi = int(min(win_len, upper) // frame)
+        if hi <= lo:
+            return None
+
+        rel = int(np.argmin(probs[lo:hi]))
+        k = lo + rel
+        quietest = float(probs[k])
+        at_ceiling = win_len >= upper
+
+        if quietest <= self.eager_prob or at_ceiling:
+            split = k * frame
+            if split <= 0:
+                return None
+            print('[VAD] split @ %.1fs (quietest p=%.2f%s, window %.1fs)'
+                  % ((start + split) / self.SAMPLE_RATE, quietest,
+                     ', ceiling' if at_ceiling and quietest > self.eager_prob else '',
                      win_len / self.SAMPLE_RATE))
-            return start + chosen
-
-        # No pause found anywhere on the ladder. Only cut once the window has
-        # reached the ceiling — then a hard cut beats waiting forever.
-        if win_len >= upper:
-            print('[VAD] hard cut @ %.1fs (no pause in %.1fs of speech)'
-                  % ((start + upper) / self.SAMPLE_RATE, win_len / self.SAMPLE_RATE))
-            return start + upper
+            return start + split
         return None
 
 
@@ -761,11 +770,13 @@ the cut lands on the latest micro-pause still within this window, so Whisper get
 as much context as allowed. Higher = more context/quality, more latency on long
 turns. Default: 10.''')
 
-    parser.add_argument('--eager-pause-ms', type=int, default=300,
+    parser.add_argument('--eager-prob', type=float, default=0.35,
                         help='''\
-Micro-pause duration in ms that qualifies as an eager split point (streaming
-mode). Lower catches briefer between-word pauses (more responsive, finer cuts);
-higher only splits on clearer breaths. Default: 300.''')
+Speech-probability threshold for an early eager cut (streaming mode). Within the
+allowed window the quietest moment is found; if its Silero speech probability is
+at or below this value it counts as a real pause and is cut early. Lower = only
+cut early on clearer silences (longer chunks); higher = cut early more eagerly.
+At the ceiling a cut always happens at the quietest point. Default: 0.35.''')
 
     parser.add_argument('--auto-stop-silence', type=int, default=10,
                         help='''\
@@ -957,7 +968,7 @@ class App():
             on_auto_stop=self._auto_stop,
             min_chunk_s=self.args.min_chunk_s,
             max_chunk_s=self.args.max_chunk_s,
-            eager_pause_ms=self.args.eager_pause_ms,
+            eager_prob=self.args.eager_prob,
         )
         self.recorder.start()
         self.replayer.capture_target_window()
@@ -1083,7 +1094,7 @@ class App():
 
         auto_stop_info = ', auto-stop after %ds silence' % self.args.auto_stop_silence if self.args.auto_stop_silence else ', no auto-stop'
         lang_info = self.args.language or 'auto-detect'
-        eager_info = (', eager flush %g-%gs on %dms pause' % (self.args.min_chunk_s, self.args.max_chunk_s, self.args.eager_pause_ms)
+        eager_info = (', eager flush %g-%gs at quietest point (p<=%.2f)' % (self.args.min_chunk_s, self.args.max_chunk_s, self.args.eager_prob)
                       if self.args.min_chunk_s else ', no eager flush')
         print('Streaming dictation mode (chunk silence: %dms%s%s, language: %s)' % (self.args.silence_ms, eager_info, auto_stop_info, lang_info))
 
