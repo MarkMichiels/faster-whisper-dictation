@@ -144,17 +144,21 @@ class StreamingRecorder:
     FRAMES_PER_BUFFER = 1024
 
     def __init__(self, transcription_queue, silence_ms=1000,
-                 auto_stop_silence_s=10, on_auto_stop=None, max_chunk_s=15):
+                 auto_stop_silence_s=10, on_auto_stop=None,
+                 min_chunk_s=2.5, max_chunk_s=10, eager_pause_ms=300):
         self.transcription_queue = transcription_queue
         self.silence_ms = silence_ms
         self.auto_stop_silence_s = auto_stop_silence_s
         self.on_auto_stop = on_auto_stop
         self.recording = False
 
-        # Eager-flush threshold: if this many seconds of speech accumulate
-        # without a >=silence_ms pause (long uninterrupted dictation), split
-        # on an internal micro-pause so transcription can start instead of
-        # waiting for the speaker to finally pause. 0 disables eager flushing.
+        # Eager flush: don't wait for a full silence_ms pause during a long
+        # turn. Once min_chunk_s of speech has piled up since the last cut,
+        # split on the next micro-pause so transcription starts early instead
+        # of after a 1s pause that may never come. max_chunk_s is the upper
+        # bound — cut at the latest pause still within it. Setting
+        # min_chunk_s to 0 disables eager flushing.
+        self.min_chunk_samples = int(min_chunk_s * self.SAMPLE_RATE) if min_chunk_s else 0
         self.max_chunk_samples = int(max_chunk_s * self.SAMPLE_RATE) if max_chunk_s else 0
 
         # Shared buffer (protected by lock)
@@ -169,14 +173,15 @@ class StreamingRecorder:
             speech_pad_ms=200,
         )
 
-        # Fine-grained VAD used only to locate a safe split point inside a
-        # long unbroken segment (shorter min_silence catches the brief
-        # between-word/breath pauses the main VAD intentionally ignores).
+        # Fine-grained VAD used only to locate a safe split point inside an
+        # ongoing turn. Its shorter min_silence (eager_pause_ms) catches the
+        # brief between-word/breath pauses the main VAD intentionally ignores,
+        # so eager cuts still land on a real word boundary, never mid-word.
         self.fine_vad_options = VadOptions(
             threshold=0.5,
-            min_speech_duration_ms=250,
-            min_silence_duration_ms=200,
-            speech_pad_ms=100,
+            min_speech_duration_ms=200,
+            min_silence_duration_ms=eager_pause_ms,
+            speech_pad_ms=80,
         )
 
         # Track how many samples we already processed in the VAD thread
@@ -313,20 +318,20 @@ class StreamingRecorder:
                 # Update processed marker to after this segment
                 self._vad_processed_samples = max(self._vad_processed_samples, seg_end)
 
-        # Eager flush: long uninterrupted dictation never trips the trailing-
-        # silence test above, so the buffer would grow until the speaker
-        # finally pauses. Once more than max_chunk_samples of audio sits
-        # unsent, split it on the latest internal micro-pause and send that
-        # head so transcription starts now instead of waiting.
-        if self.max_chunk_samples:
+        # Eager flush: a long turn with only short (<silence_ms) pauses never
+        # trips the trailing-silence test above, so the buffer would grow
+        # until the speaker finally pauses for real. Once min_chunk_samples of
+        # audio sits unsent, split it on a micro-pause and send that head so
+        # transcription starts now instead of waiting.
+        if self.min_chunk_samples:
             unsent_len = audio_end - self._vad_processed_samples
-            if unsent_len > self.max_chunk_samples:
+            if unsent_len > self.min_chunk_samples:
                 split = self._find_split_point(audio, self._vad_processed_samples, audio_end)
                 if split is not None and split > self._vad_processed_samples:
                     chunk = audio[self._vad_processed_samples:split]
                     if len(chunk) > self.SAMPLE_RATE * 0.1:
                         duration = len(chunk) / self.SAMPLE_RATE
-                        print('[VAD] Eager chunk: %.1fs (long dictation, samples %d-%d)'
+                        print('[VAD] Eager chunk: %.1fs (micro-pause, samples %d-%d)'
                               % (duration, self._vad_processed_samples, split))
                         self.transcription_queue.put(chunk)
                     self._vad_processed_samples = split
@@ -337,10 +342,11 @@ class StreamingRecorder:
         """Locate a safe split point inside audio[start:hard_end].
 
         Runs the fine-grained VAD over the unsent window and returns the
-        midpoint of the last between-speech gap that keeps the resulting
-        chunk at or under max_chunk_samples. Returns an absolute sample
-        index, or None when there is no usable gap (e.g. truly unbroken
-        speech) — in that case we wait rather than cut mid-word.
+        midpoint of the latest between-speech gap that yields a chunk between
+        min_chunk_samples and max_chunk_samples long — i.e. cut as late as
+        allowed (most context for Whisper) but never shorter than the floor.
+        Returns an absolute sample index, or None when no gap qualifies (e.g.
+        truly unbroken speech) — then we wait rather than cut mid-word.
         """
         window = audio[start:hard_end]
         if len(window) < self.SAMPLE_RATE * 0.5:
@@ -352,13 +358,16 @@ class StreamingRecorder:
             # Need a gap between two speech runs to split safely
             return None
 
+        upper = self.max_chunk_samples or (hard_end - start)
         best = None
         for i in range(len(fine_ts) - 1):
             gap_mid = (fine_ts[i]['end'] + fine_ts[i + 1]['start']) // 2
-            if gap_mid <= self.max_chunk_samples:
-                best = gap_mid
+            if gap_mid < self.min_chunk_samples:
+                continue          # chunk would be too short — keep looking
+            if gap_mid <= upper:
+                best = gap_mid    # latest acceptable pause so far
             else:
-                break
+                break             # past the upper bound — stop
 
         if best is None:
             return None
@@ -710,13 +719,26 @@ Silence duration in milliseconds before splitting a speech chunk (streaming mode
 Lower values give faster feedback but may split mid-sentence.
 Default: 1000 (1 second).''')
 
-    parser.add_argument('--max-chunk-s', type=float, default=15,
+    parser.add_argument('--min-chunk-s', type=float, default=2.5,
                         help='''\
-Eager-flush threshold in seconds (streaming mode). When you dictate this long
-without a >=silence-ms pause, the audio is split on an internal micro-pause and
-transcription starts immediately instead of waiting for you to pause. Higher
-gives Whisper more context (better quality) but more latency on long monologues;
-lower gives faster feedback. Set to 0 to disable. Default: 15.''')
+Eager-flush floor in seconds (streaming mode). Once you have spoken this long
+since the last cut, the audio is split on the next micro-pause and transcription
+starts immediately instead of waiting for a full >=silence-ms pause. Lower gives
+faster feedback but shorter (less context) chunks; higher waits for more speech.
+Set to 0 to disable eager flushing. Default: 2.5.''')
+
+    parser.add_argument('--max-chunk-s', type=float, default=10,
+                        help='''\
+Eager-flush ceiling in seconds (streaming mode). Upper bound on an eager chunk:
+the cut lands on the latest micro-pause still within this window, so Whisper gets
+as much context as allowed. Higher = more context/quality, more latency on long
+turns. Default: 10.''')
+
+    parser.add_argument('--eager-pause-ms', type=int, default=300,
+                        help='''\
+Micro-pause duration in ms that qualifies as an eager split point (streaming
+mode). Lower catches briefer between-word pauses (more responsive, finer cuts);
+higher only splits on clearer breaths. Default: 300.''')
 
     parser.add_argument('--auto-stop-silence', type=int, default=10,
                         help='''\
@@ -906,7 +928,9 @@ class App():
             silence_ms=self.args.silence_ms,
             auto_stop_silence_s=self.args.auto_stop_silence or None,
             on_auto_stop=self._auto_stop,
+            min_chunk_s=self.args.min_chunk_s,
             max_chunk_s=self.args.max_chunk_s,
+            eager_pause_ms=self.args.eager_pause_ms,
         )
         self.recorder.start()
         self.replayer.capture_target_window()
@@ -1032,7 +1056,8 @@ class App():
 
         auto_stop_info = ', auto-stop after %ds silence' % self.args.auto_stop_silence if self.args.auto_stop_silence else ', no auto-stop'
         lang_info = self.args.language or 'auto-detect'
-        eager_info = ', eager flush >%gs' % self.args.max_chunk_s if self.args.max_chunk_s else ', no eager flush'
+        eager_info = (', eager flush %g-%gs on %dms pause' % (self.args.min_chunk_s, self.args.max_chunk_s, self.args.eager_pause_ms)
+                      if self.args.min_chunk_s else ', no eager flush')
         print('Streaming dictation mode (chunk silence: %dms%s%s, language: %s)' % (self.args.silence_ms, eager_info, auto_stop_info, lang_info))
 
         if (platform.system() != 'Windows' and not self.args.key_combo) or self.args.double_key:
