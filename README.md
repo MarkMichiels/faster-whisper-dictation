@@ -94,9 +94,20 @@ pip3 install -r requirements.txt
 
 ### Streaming mode (default)
 
-The default mode uses **Silero VAD** (Voice Activity Detection) to split audio on natural
-pauses. Each speech chunk is transcribed and typed immediately while recording continues.
-This gives real-time feedback — you see text appear after each sentence.
+The default mode uses **Silero VAD** (Voice Activity Detection) to split audio into
+chunks that are transcribed and typed immediately while recording continues, so you
+see text appear during a long turn instead of only at the end.
+
+Two mechanisms split the stream:
+
+- **Main VAD** closes a clean segment once it sees a full pause (`--silence-ms`, 1s).
+- **Eager flush** handles long, steady turns that never hit a 1s pause. Once
+  `--min-chunk-s` (2.5s) of speech has accumulated, it finds the **quietest moment**
+  in the window using Silero's per-frame speech probabilities and cuts there when
+  that point is a real pause (probability ≤ `--eager-prob`, 0.35) — or, on reaching
+  the `--max-chunk-s` (10s) ceiling, cuts at the quietest point regardless. Cuts
+  always land on the best available word boundary, never mid-word, and a fluent
+  unbroken talker is never left waiting.
 
 ```bash
 # GPU with large model (recommended for accuracy)
@@ -105,11 +116,14 @@ python3 dictation.py -m large-v3 -v cuda -c float16 -l nl
 # CPU with small model (no GPU required)
 python3 dictation.py -m small -l en
 
-# Custom silence threshold (split after 500ms pause instead of 1000ms)
-python3 dictation.py -m large-v3 -v cuda -c float16 -l nl --silence-ms 500
+# More responsive (cut sooner, shorter chunks)
+python3 dictation.py -m large-v3 -v cuda -c float16 -l nl --min-chunk-s 1.5
 
-# Disable auto-stop (keep recording until manual stop)
-python3 dictation.py -m large-v3 -v cuda -c float16 -l nl --auto-stop-silence 0
+# Longer, higher-context chunks (only cut early on clearer silences)
+python3 dictation.py -m large-v3 -v cuda -c float16 -l nl --min-chunk-s 3 --max-chunk-s 12 --eager-prob 0.25
+
+# Disable eager flush (only cut on full >=1s pauses)
+python3 dictation.py -m large-v3 -v cuda -c float16 -l nl --min-chunk-s 0
 
 # No time limit (auto-stop after silence still works)
 python3 dictation.py -m large-v3 -v cuda -c float16 -l nl -t 0
@@ -119,16 +133,15 @@ python3 dictation.py -m large-v3 -v cuda -c float16 -l nl -t 0
 
 ```
 [Recording Thread] --> audio frames --> [VAD Thread] --> speech chunks
-                                        (Silero VAD)
+                              (main VAD + eager quietest-point split)
     --> transcription_queue --> [Transcription Thread] --> text
     --> typing_queue --> [Typing Thread] --> keyboard output
 ```
 
 1. Double-tap Right Ctrl --> beep
-2. Speak a sentence --> pause ~1 second --> text appears (~1.8s after pause)
-3. Speak next sentence --> pause --> text appears
-4. Stop speaking for 10 seconds --> double beep (auto-stop)
-5. Or tap Right Ctrl --> single beep (manual stop)
+2. Speak — text appears in chunks during your turn (cut at pauses / quietest points)
+3. Stop speaking for 10 seconds --> double beep (auto-stop)
+4. Or tap Right Ctrl --> single beep (manual stop)
 
 ### Batch mode (original)
 
@@ -144,8 +157,9 @@ python3 dictation.py -m large-v3 -v cuda -c float16 -l nl --batch-mode
 ```
 python3 dictation.py [-h] [-m MODEL_NAME] [-k KEY_COMBO] [-d DOUBLE_KEY]
                      [-t MAX_TIME] [-v DEVICE] [-c COMPUTE_TYPE]
-                     [-l LANGUAGE] [--silence-ms MS] [--auto-stop-silence S]
-                     [--batch-mode]
+                     [-l LANGUAGE] [--silence-ms MS] [--min-chunk-s S]
+                     [--max-chunk-s S] [--eager-prob P]
+                     [--auto-stop-silence S] [--batch-mode]
 
   -h, --help            show this help message and exit
 
@@ -181,9 +195,22 @@ python3 dictation.py [-h] [-m MODEL_NAME] [-k KEY_COMBO] [-d DOUBLE_KEY]
                         Improves accuracy for short fragments.
                         Default: auto-detect.
 
-  --silence-ms MS       Silence duration in ms before splitting a speech chunk
-                        (streaming mode). Lower = faster feedback but may split
-                        mid-sentence. Default: 1000.
+  --silence-ms MS       Silence duration in ms at which the main VAD closes a
+                        full segment (end of speaking). Default: 1000.
+
+  --min-chunk-s S       Eager-flush floor (streaming mode): only cut after this
+                        much speech has accumulated since the last cut. Lower =
+                        more responsive, shorter chunks. 0 disables eager flush.
+                        Default: 2.5.
+
+  --max-chunk-s S       Eager-flush ceiling (streaming mode): cut here at the
+                        latest, landing on the quietest point in the window.
+                        Higher = more context, more latency. Default: 10.
+
+  --eager-prob P        Speech-probability threshold for an early eager cut: if
+                        the quietest point in the window is at or below P it
+                        counts as a real pause and is cut early. Lower = only cut
+                        early on clearer silences. Default: 0.35.
 
   --auto-stop-silence S
                         Automatically stop after S seconds of silence
