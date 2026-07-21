@@ -109,6 +109,12 @@ Two mechanisms split the stream:
   always land on the best available word boundary, never mid-word, and a fluent
   unbroken talker is never left waiting.
 
+Because eager flush hands Whisper short chunks, each next chunk is primed with a
+**rolling tail of the text transcribed so far** (`--context-chars`, 500) via
+Whisper's `initial_prompt`, so cross-chunk context (topic, names, sentence flow)
+is not lost by the splitting. The tail resets at session start and on language
+toggle.
+
 ```bash
 # GPU with large model (recommended for accuracy)
 python3 dictation.py -m large-v3 -v cuda -c float16 -l nl
@@ -158,7 +164,7 @@ python3 dictation.py -m large-v3 -v cuda -c float16 -l nl --batch-mode
 python3 dictation.py [-h] [-m MODEL_NAME] [-k KEY_COMBO] [-d DOUBLE_KEY]
                      [-t MAX_TIME] [-v DEVICE] [-c COMPUTE_TYPE]
                      [-l LANGUAGE] [--silence-ms MS] [--min-chunk-s S]
-                     [--max-chunk-s S] [--eager-prob P]
+                     [--max-chunk-s S] [--eager-prob P] [--context-chars N]
                      [--auto-stop-silence S] [--batch-mode]
 
   -h, --help            show this help message and exit
@@ -211,6 +217,12 @@ python3 dictation.py [-h] [-m MODEL_NAME] [-k KEY_COMBO] [-d DOUBLE_KEY]
                         the quietest point in the window is at or below P it
                         counts as a real pause and is cut early. Lower = only cut
                         early on clearer silences. Default: 0.35.
+
+  --context-chars N     Rolling tail of previously transcribed session text fed
+                        to each next chunk as initial_prompt, restoring context
+                        across eager-flush cuts. Capped at N characters; resets
+                        on session start and language toggle. 0 disables.
+                        Default: 500.
 
   --auto-stop-silence S
                         Automatically stop after S seconds of silence

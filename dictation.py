@@ -413,17 +413,30 @@ class StreamingRecorder:
 class TranscriptionWorker:
     """Loads Whisper model once and transcribes audio chunks from a queue."""
 
-    def __init__(self, model_size='base', device='cpu', compute_type='int8', language=None):
+    def __init__(self, model_size='base', device='cpu', compute_type='int8', language=None,
+                 context_chars=500):
         print('Loading Whisper model: %s (device=%s, compute=%s)' % (model_size, device, compute_type))
         self.model = WhisperModel(model_size, device=device, compute_type=compute_type)
         self.language = language
+        # Rolling tail of text transcribed earlier in this session, fed to the
+        # next chunk as initial_prompt so eager-flush chunks keep cross-seam
+        # context (Whisper's prompt window is 224 tokens; the char cap stays
+        # well under that). 0 disables.
+        self.context_chars = context_chars
+        self._context = ''
+
+    def reset_context(self):
+        """Forget the rolling context (new session or language switch)."""
+        self._context = ''
 
     def transcribe_chunk(self, audio_fp32):
         """Transcribe a single audio chunk. Returns text string."""
+        prompt = self._context if (self.context_chars and self._context) else None
         if self.language:
-            segments, info = self.model.transcribe(audio_fp32, beam_size=5, language=self.language)
+            segments, info = self.model.transcribe(audio_fp32, beam_size=5, language=self.language,
+                                                   initial_prompt=prompt)
         else:
-            segments, info = self.model.transcribe(audio_fp32, beam_size=5)
+            segments, info = self.model.transcribe(audio_fp32, beam_size=5, initial_prompt=prompt)
             print("Detected language '%s' with probability %f" % (info.language, info.language_probability))
 
         text = ''
@@ -432,6 +445,9 @@ class TranscriptionWorker:
             if text == '' and seg_text.startswith(' '):
                 seg_text = seg_text[1:]
             text += seg_text
+
+        if self.context_chars and text.strip():
+            self._context = (self._context + ' ' + text.strip()).strip()[-self.context_chars:]
 
         return text
 
@@ -778,6 +794,14 @@ at or below this value it counts as a real pause and is cut early. Lower = only
 cut early on clearer silences (longer chunks); higher = cut early more eagerly.
 At the ceiling a cut always happens at the quietest point. Default: 0.35.''')
 
+    parser.add_argument('--context-chars', type=int, default=500,
+                        help='''\
+Carry a rolling tail of previously transcribed text (this session) into each next
+chunk as Whisper's initial_prompt (streaming mode). Restores cross-chunk context
+lost by eager-flush splitting, improving accuracy on fluent dictation. The tail
+is capped at this many characters (well under Whisper's 224-token prompt window)
+and resets on session start and language toggle. Set to 0 to disable. Default: 500.''')
+
     parser.add_argument('--auto-stop-silence', type=int, default=10,
                         help='''\
 Automatically stop recording after this many seconds of silence (streaming mode).
@@ -930,7 +954,8 @@ class App():
 
         # Workers
         self.transcription_worker = TranscriptionWorker(
-            args.model_name, args.device, args.compute_type, args.language
+            args.model_name, args.device, args.compute_type, args.language,
+            context_chars=args.context_chars,
         )
         self.replayer = KeyboardReplayer()
         self.recorder = None  # created fresh each session
@@ -951,6 +976,7 @@ class App():
             return None
 
         self.active = True
+        self.transcription_worker.reset_context()
 
         # Drain any leftover items from previous session
         for q in (self.transcription_queue, self.typing_queue):
@@ -1032,6 +1058,8 @@ class App():
         current = self.transcription_worker.language
         new_lang = 'en' if current == 'nl' else 'nl'
         self.transcription_worker.language = new_lang
+        # Old-language context would steer Whisper the wrong way after a switch
+        self.transcription_worker.reset_context()
         lang_name = 'English' if new_lang == 'en' else 'Nederlands'
         print('[Language] Switched to %s (%s)' % (lang_name, new_lang))
         # Audio feedback: two quick beeps (distinct from single start/stop beep)
@@ -1096,7 +1124,9 @@ class App():
         lang_info = self.args.language or 'auto-detect'
         eager_info = (', eager flush %g-%gs at quietest point (p<=%.2f)' % (self.args.min_chunk_s, self.args.max_chunk_s, self.args.eager_prob)
                       if self.args.min_chunk_s else ', no eager flush')
-        print('Streaming dictation mode (chunk silence: %dms%s%s, language: %s)' % (self.args.silence_ms, eager_info, auto_stop_info, lang_info))
+        context_info = (', rolling context %d chars' % self.args.context_chars
+                        if self.args.context_chars else ', no rolling context')
+        print('Streaming dictation mode (chunk silence: %dms%s%s%s, language: %s)' % (self.args.silence_ms, eager_info, context_info, auto_stop_info, lang_info))
 
         if (platform.system() != 'Windows' and not self.args.key_combo) or self.args.double_key:
             key = self.args.double_key or (platform.system() == 'Linux' and '<ctrl_r>') or '<cmd_r>'
