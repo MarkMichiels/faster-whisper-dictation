@@ -210,7 +210,7 @@ class StreamingRecorder:
             leftover = remaining[self._vad_processed_samples:]
             if len(leftover) > self.SAMPLE_RATE * 0.1:  # at least 100ms
                 print('[flush] Sending remaining %.1fs audio' % (len(leftover) / self.SAMPLE_RATE))
-                self.transcription_queue.put(leftover)
+                self.transcription_queue.put((leftover, True))
 
         # Sentinel to signal end of stream
         self.transcription_queue.put(None)
@@ -312,7 +312,9 @@ class StreamingRecorder:
                 if len(chunk) > self.SAMPLE_RATE * 0.1:  # at least 100ms
                     duration = len(chunk) / self.SAMPLE_RATE
                     print('[VAD] Speech chunk: %.1fs (samples %d-%d)' % (duration, chunk_start, seg_end))
-                    self.transcription_queue.put(chunk)
+                    # Boundary: a full >=silence_ms pause followed this segment,
+                    # a natural sentence end — flush the paste buffer here.
+                    self.transcription_queue.put((chunk, True))
 
                 # Update processed marker to after this segment
                 self._vad_processed_samples = max(self._vad_processed_samples, seg_end)
@@ -332,7 +334,10 @@ class StreamingRecorder:
                         duration = len(chunk) / self.SAMPLE_RATE
                         print('[VAD] Eager chunk: %.1fs (samples %d-%d)'
                               % (duration, self._vad_processed_samples, split))
-                        self.transcription_queue.put(chunk)
+                        # Not a boundary: only a micro-pause inside fluent speech.
+                        # The paste buffer keeps accumulating these until it
+                        # reaches paste_min_s, then transcribes them merged.
+                        self.transcription_queue.put((chunk, False))
                     self._vad_processed_samples = split
 
         self._trim_buffer()
@@ -794,6 +799,16 @@ at or below this value it counts as a real pause and is cut early. Lower = only
 cut early on clearer silences (longer chunks); higher = cut early more eagerly.
 At the ceiling a cut always happens at the quietest point. Default: 0.35.''')
 
+    parser.add_argument('--paste-min-s', type=float, default=12.0,
+                        help='''\
+Hold-back paste buffer (streaming mode). Instead of transcribing and typing
+every short eager chunk on its own, accumulate audio chunks until they total
+this many seconds, then transcribe them merged in one pass and paste the result
+in one go. More context per pass = better accuracy; the trade-off is text lands
+in fewer, larger blocks with a bit more delay. A real >=silence-ms pause (natural
+sentence end) always flushes early, as does the end of the turn. Set to 0 to
+transcribe each chunk immediately (old behaviour). Default: 12.''')
+
     parser.add_argument('--context-chars', type=int, default=500,
                         help='''\
 Carry a rolling tail of previously transcribed text (this session) into each next
@@ -1070,24 +1085,55 @@ class App():
         return self.start() or self.stop()
 
     def _transcription_loop(self):
-        """Consumer: takes audio chunks from transcription_queue, transcribes, puts text on typing_queue."""
-        while True:
-            chunk = self.transcription_queue.get()
-            if chunk is None:
-                # Sentinel: end of stream
-                self.typing_queue.put(None)
-                break
+        """Consumer: takes audio chunks from transcription_queue, transcribes, puts text on typing_queue.
 
+        Chunks arrive as (audio, is_boundary) tuples. Rather than transcribing
+        every short eager chunk on its own, they are held in a paste buffer and
+        merged into one longer audio segment before a single transcribe+type,
+        so Whisper sees more context per pass (better accuracy) and text lands
+        in fewer, larger pastes. The buffer flushes when it reaches
+        paste_min_s of audio, when a boundary (real >=silence_ms pause) arrives,
+        or at end of stream. Nothing already typed is ever revised — the merge
+        happens *before* the paste. paste_min_s=0 falls back to per-chunk.
+        """
+        paste_min_samples = int(self.args.paste_min_s * StreamingRecorder.SAMPLE_RATE) if self.args.paste_min_s else 0
+        pending = []
+        pending_samples = 0
+
+        def flush():
+            nonlocal pending, pending_samples
+            if not pending:
+                return
+            merged = np.concatenate(pending) if len(pending) > 1 else pending[0]
+            n_parts = len(pending)
+            pending = []
+            pending_samples = 0
             try:
                 t0 = time.time()
-                text = self.transcription_worker.transcribe_chunk(chunk)
+                text = self.transcription_worker.transcribe_chunk(merged)
                 elapsed = time.time() - t0
-                audio_dur = len(chunk) / StreamingRecorder.SAMPLE_RATE
-                print('[transcribe] %.1fs audio -> %.1fs processing: "%s"' % (audio_dur, elapsed, text.strip()))
+                audio_dur = len(merged) / StreamingRecorder.SAMPLE_RATE
+                print('[transcribe] %.1fs audio (%d part%s) -> %.1fs processing: "%s"'
+                      % (audio_dur, n_parts, '' if n_parts == 1 else 's', elapsed, text.strip()))
                 if text.strip():
                     self.typing_queue.put(text)
             except Exception as e:
                 print('[transcribe] Error: %s' % e)
+
+        while True:
+            item = self.transcription_queue.get()
+            if item is None:
+                # Sentinel: end of stream — paste whatever is still buffered.
+                flush()
+                self.typing_queue.put(None)
+                break
+
+            chunk, is_boundary = item
+            pending.append(chunk)
+            pending_samples += len(chunk)
+
+            if paste_min_samples == 0 or is_boundary or pending_samples >= paste_min_samples:
+                flush()
 
     def _typing_loop(self):
         """Consumer: takes text from typing_queue and types it."""
@@ -1126,7 +1172,9 @@ class App():
                       if self.args.min_chunk_s else ', no eager flush')
         context_info = (', rolling context %d chars' % self.args.context_chars
                         if self.args.context_chars else ', no rolling context')
-        print('Streaming dictation mode (chunk silence: %dms%s%s%s, language: %s)' % (self.args.silence_ms, eager_info, context_info, auto_stop_info, lang_info))
+        paste_info = (', merge-paste >=%gs' % self.args.paste_min_s
+                      if self.args.paste_min_s else ', paste per chunk')
+        print('Streaming dictation mode (chunk silence: %dms%s%s%s%s, language: %s)' % (self.args.silence_ms, eager_info, paste_info, context_info, auto_stop_info, lang_info))
 
         if (platform.system() != 'Windows' and not self.args.key_combo) or self.args.double_key:
             key = self.args.double_key or (platform.system() == 'Linux' and '<ctrl_r>') or '<cmd_r>'

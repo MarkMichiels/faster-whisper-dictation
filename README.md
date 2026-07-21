@@ -115,6 +115,16 @@ Whisper's `initial_prompt`, so cross-chunk context (topic, names, sentence flow)
 is not lost by the splitting. The tail resets at session start and on language
 toggle.
 
+**Hold-back merge paste.** For even better accuracy the eager chunks are not
+transcribed one by one. They accumulate in a paste buffer until they total
+`--paste-min-s` (12s), then that longer audio is transcribed in a single pass
+and typed in one go — Whisper sees more context per pass, and text lands in
+fewer, larger blocks. A real ≥`--silence-ms` pause (natural sentence end) or the
+end of the turn flushes the buffer early. Nothing already typed is ever revised;
+the merge happens *before* the paste. Because a modern GPU sits idle most of the
+time on short chunks, the longer pass is effectively free. Set `--paste-min-s 0`
+to transcribe and type each chunk immediately (the old behaviour).
+
 ```bash
 # GPU with large model (recommended for accuracy)
 python3 dictation.py -m large-v3 -v cuda -c float16 -l nl
@@ -164,8 +174,8 @@ python3 dictation.py -m large-v3 -v cuda -c float16 -l nl --batch-mode
 python3 dictation.py [-h] [-m MODEL_NAME] [-k KEY_COMBO] [-d DOUBLE_KEY]
                      [-t MAX_TIME] [-v DEVICE] [-c COMPUTE_TYPE]
                      [-l LANGUAGE] [--silence-ms MS] [--min-chunk-s S]
-                     [--max-chunk-s S] [--eager-prob P] [--context-chars N]
-                     [--auto-stop-silence S] [--batch-mode]
+                     [--max-chunk-s S] [--eager-prob P] [--paste-min-s S]
+                     [--context-chars N] [--auto-stop-silence S] [--batch-mode]
 
   -h, --help            show this help message and exit
 
@@ -217,6 +227,13 @@ python3 dictation.py [-h] [-m MODEL_NAME] [-k KEY_COMBO] [-d DOUBLE_KEY]
                         the quietest point in the window is at or below P it
                         counts as a real pause and is cut early. Lower = only cut
                         early on clearer silences. Default: 0.35.
+
+  --paste-min-s S       Hold-back paste buffer (streaming mode): accumulate eager
+                        chunks until they total S seconds, then transcribe them
+                        merged in one pass and paste at once. More context per
+                        pass = better accuracy; text lands in fewer, larger
+                        blocks. A real pause or end of turn flushes early. Never
+                        revises typed text. 0 = paste each chunk. Default: 12.
 
   --context-chars N     Rolling tail of previously transcribed session text fed
                         to each next chunk as initial_prompt, restoring context
