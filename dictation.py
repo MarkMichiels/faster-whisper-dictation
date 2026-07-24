@@ -13,6 +13,13 @@ from pynput import keyboard
 from transitions import Machine
 
 
+# Sentinel: distinguishes "caller passed no language" (keep current) from an
+# explicit language=None ("auto-detect this session"). Used by App.start /
+# BatchApp.start so the momentary hotkey selection sets the language every
+# session without the combo-mode toggle() path resetting a forced -l language.
+_UNSET = object()
+
+
 
 if platform.system() == 'Windows':
     import winsound
@@ -632,27 +639,36 @@ class KeyListener():
 
 
 class MultiTapKeyListener():
-    """Detect double-tap and single-tap on a modifier key, with optional
-    second key for language toggle.
+    """Detect double-tap and single-tap on a modifier key, with momentary
+    Left-Shift language selection.
 
     Ctrl_R:
     - Single tap   → deactivate_callback (stop recording, instant)
-    - Double tap   → activate_callback (start recording, instant)
+    - Double tap   → activate_callback(language) (start recording, instant)
 
-    AltGr (optional):
-    - Double tap   → toggle_language_callback
+    Left-Shift (momentary, no state kept):
+    - Held while the double-tap fires → activate in `shift_language` (English)
+    - Not held                        → activate in `default_language`
+    The language is chosen at start time only; nothing is remembered between
+    sessions. Right-Shift is deliberately ignored (name 'shift_r').
+
+    toggle_language_callback / language_key remain for backward compatibility
+    (old stateful AltGr toggle) but are unused by default.
     """
 
     TAP_WINDOW = 0.3   # max seconds between taps for double-tap
 
     def __init__(self, activate_callback, deactivate_callback,
                  toggle_language_callback=None, key=keyboard.Key.cmd_r,
-                 language_key=None):
+                 language_key=None, default_language=None, shift_language='en'):
         self.activate_callback = activate_callback
         self.deactivate_callback = deactivate_callback
         self.toggle_language_callback = toggle_language_callback
         self.key = key
         self.language_key = language_key
+        self.default_language = default_language
+        self.shift_language = shift_language
+        self.shift_held = False
         self.last_press_time = 0
         self.tap_count = 0
         self.lang_last_press_time = 0
@@ -676,11 +692,19 @@ class MultiTapKeyListener():
         return key == target
 
     def on_press(self, key):
+        name = getattr(key, 'name', None)
+        # Track Left-Shift held state for momentary language selection. Holding
+        # Left-Shift while double-tapping the main key dictates in the shift
+        # language (English) for that session only. Left-Shift reports name
+        # 'shift' (vk 65505) on X11; Right-Shift ('shift_r') is ignored.
+        if name in ('shift', 'shift_l'):
+            self.shift_held = True
+            return
         # Skip generic modifier events (e.g. Key.ctrl vk=65507) that pynput
         # sends alongside the specific Key.ctrl_r/Key.ctrl_l events.
         # Without this, pressing Ctrl_R triggers both Key.ctrl_r AND Key.ctrl,
         # and Key.ctrl shares vk=65507 with Key.ctrl_l causing false matches.
-        if hasattr(key, 'name') and key.name in ('ctrl', 'alt', 'shift'):
+        if name in ('ctrl', 'alt'):
             return
 
         # Main key: Ctrl_R — double-tap start, single-tap stop
@@ -693,7 +717,8 @@ class MultiTapKeyListener():
             self.last_press_time = current_time
 
             if self.tap_count == 2:
-                self.activate_callback()
+                language = self.shift_language if self.shift_held else self.default_language
+                self.activate_callback(language)
             elif self.tap_count == 1:
                 self.deactivate_callback()
 
@@ -712,7 +737,9 @@ class MultiTapKeyListener():
                     self.toggle_language_callback()
 
     def on_release(self, key):
-        pass
+        name = getattr(key, 'name', None)
+        if name in ('shift', 'shift_l'):
+            self.shift_held = False
 
     def run(self):
         with keyboard.Listener(
@@ -769,6 +796,12 @@ Force a specific language for transcription (e.g., 'nl' for Dutch, 'en' for Engl
 This improves accuracy especially for short audio fragments where auto-detection can fail.
 If not specified, language will be auto-detected.
 Common codes: nl (Dutch), en (English), fr (French), de (German), es (Spanish).''')
+
+    parser.add_argument('--shift-language', type=str, default='en',
+                        help='''\
+Language used for a session when Left-Shift is held while double-tapping the
+start key (momentary, no state kept). The unshifted double-tap uses --language.
+Default: en (English).''')
 
     parser.add_argument('--silence-ms', type=int, default=1000,
                         help='''\
@@ -877,8 +910,10 @@ class BatchApp():
     def beep(self, k, wait=True):
         playsound(self.SOUND_EFFECTS[k], wait=wait)
 
-    def start(self):
+    def start(self, language=_UNSET):
         if self.m.is_READY():
+            if language is not _UNSET:
+                self.transcriber.language = language
             # Start recording BEFORE beep so no audio is missed
             if self.args.max_time:
                 self.timer = threading.Timer(self.args.max_time, self.timer_stop)
@@ -924,14 +959,14 @@ class BatchApp():
 
         if (platform.system() != 'Windows' and not self.args.key_combo) or self.args.double_key:
             key = self.args.double_key or (platform.system() == 'Linux' and '<ctrl_r>') or '<cmd_r>'
-            # AltGr sends vk=65027 (ISO_Level3_Shift), not Key.alt_gr (65406)
-            lang_key = keyboard.KeyCode.from_vk(65027) if platform.system() == 'Linux' else None
             keylistener = MultiTapKeyListener(
-                self.start, self.stop, self.toggle_language,
-                normalize_key_names(key, parse=True),
-                language_key=lang_key,
+                self.start, self.stop,
+                key=normalize_key_names(key, parse=True),
+                default_language=self.args.language,
+                shift_language=self.args.shift_language,
             )
-            self.m.on_enter_READY(lambda *_: print("Double tap ", key, " to start/stop. Double tap Ctrl_L to toggle language."))
+            self.m.on_enter_READY(lambda *_: print("Double tap %s to start/stop (language: %s). Hold Left-Shift + double tap to dictate in %s."
+                                                   % (key, self.args.language or 'auto-detect', self.args.shift_language)))
         else:
             key = self.args.key_combo or '<win>+z'
             keylistener= KeyListener(self.toggle, normalize_key_names(key))
@@ -985,12 +1020,21 @@ class App():
     def beep(self, k, wait=True):
         playsound(self.SOUND_EFFECTS[k], wait=wait)
 
-    def start(self):
-        """Begin a streaming dictation session."""
+    def start(self, language=_UNSET):
+        """Begin a streaming dictation session.
+
+        language: transcription language for THIS session, chosen at start
+        time from the hotkey modifier (Left-Shift held -> English, otherwise
+        the configured default). Set every session so nothing is remembered.
+        None means auto-detect. _UNSET (combo-mode toggle path) keeps the
+        currently configured language untouched.
+        """
         if self.active:
             return None
 
         self.active = True
+        if language is not _UNSET:
+            self.transcription_worker.language = language
         self.transcription_worker.reset_context()
 
         # Drain any leftover items from previous session
@@ -1178,14 +1222,14 @@ class App():
 
         if (platform.system() != 'Windows' and not self.args.key_combo) or self.args.double_key:
             key = self.args.double_key or (platform.system() == 'Linux' and '<ctrl_r>') or '<cmd_r>'
-            # AltGr sends vk=65027 (ISO_Level3_Shift), not Key.alt_gr (65406)
-            lang_key = keyboard.KeyCode.from_vk(65027) if platform.system() == 'Linux' else None
             keylistener = MultiTapKeyListener(
-                self.start, self.stop, self.toggle_language,
-                normalize_key_names(key, parse=True),
-                language_key=lang_key,
+                self.start, self.stop,
+                key=normalize_key_names(key, parse=True),
+                default_language=self.args.language,
+                shift_language=self.args.shift_language,
             )
-            print("Double tap ", key, " to start/stop. Double tap AltGr to toggle language.")
+            print("Double tap %s to start/stop (language: %s). Hold Left-Shift + double tap to dictate in %s."
+                  % (key, self.args.language or 'auto-detect', self.args.shift_language))
         else:
             key = self.args.key_combo or '<win>+z'
             keylistener = KeyListener(self.toggle, normalize_key_names(key))
