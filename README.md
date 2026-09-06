@@ -142,6 +142,11 @@ a "dank u/je wel" variant). Two defences run by default:
   drop is logged as `[filter]`. Dropped text also never enters the rolling
   context, which would otherwise prompt the next chunk to repeat it.
 
+Removing silence shifts segment boundaries, so on noisy far-field recordings a
+few unclear passages may decode slightly differently (neither version was
+better in testing; close-mic dictation is unaffected). Use
+`--no-transcribe-vad` to rule out the gate when investigating a dropped word.
+
 Dictated punctuation is also made safe for Markdown: runs of `* - _ = ~ #` are
 spaced out (`***` -> `* * *`) so they cannot render as a horizontal rule, table
 separator or heading underline, and `...` is typed per `--ellipsis-style`.
