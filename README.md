@@ -125,6 +125,27 @@ the merge happens *before* the paste. Because a modern GPU sits idle most of the
 time on short chunks, the longer pass is effectively free. Set `--paste-min-s 0`
 to transcribe and type each chunk immediately (the old behaviour).
 
+**Silence hygiene.** Whisper was trained on subtitled video, so a chunk without
+real speech does not decode to an empty string — it decodes to the most likely
+*subtitle for silence*: `***`, a broadcaster ident, or a sign-off such as
+"Dank u wel." / "Thank you for watching." Chunk-based dictation hands the model
+many short segments, so these appeared regularly in the middle of dictated text
+(measured over 60 days on one machine: 93x `***`, 30x `TV Gelderland 2021`, 41x
+a "dank u/je wel" variant). Two defences run by default:
+
+- **VAD gate on transcription** (`vad_filter`): silence is removed before the
+  decoder sees it, so there is nothing to hallucinate from. Note that
+  `no_speech_prob` cannot be used for this instead: with a rolling
+  `initial_prompt` set it collapses from 0.88 to 0.08 on pure silence.
+- **Phrase filter** (`HALLUCINATION_PHRASES`): drops a chunk that is *entirely*
+  a known artefact. A phrase inside a real sentence is never touched, and every
+  drop is logged as `[filter]`. Dropped text also never enters the rolling
+  context, which would otherwise prompt the next chunk to repeat it.
+
+Dictated punctuation is also made safe for Markdown: runs of `* - _ = ~ #` are
+spaced out (`***` -> `* * *`) so they cannot render as a horizontal rule, table
+separator or heading underline, and `...` is typed per `--ellipsis-style`.
+
 ```bash
 # GPU with large model (recommended for accuracy)
 python3 dictation.py -m large-v3 -v cuda -c float16 -l nl
@@ -245,6 +266,23 @@ python3 dictation.py [-h] [-m MODEL_NAME] [-k KEY_COMBO] [-d DOUBLE_KEY]
                         Automatically stop after S seconds of silence
                         (streaming mode). Plays double beep to distinguish from
                         manual stop. Set to 0 to disable. Default: 10.
+
+  --ellipsis-style STYLE
+                        How a dictated pause ('...') is typed: 'space' writes
+                        '. . .' so no editor or chat client can auto-format it
+                        into a dash, 'single' writes one ellipsis character,
+                        'keep' leaves it unchanged. Default: space.
+
+  --no-transcribe-vad   Disable the VAD gate on the transcribe call. On by
+                        default; this is what stops subtitle artefacts being
+                        decoded out of silence. Only for debugging suspected
+                        dropped words.
+
+  --no-hallucination-filter
+                        Disable the phrase filter for chunks that are entirely a
+                        known silence artefact.
+
+  --no-space-rule-runs  Disable spacing of character runs like '---'.
 
   --batch-mode          Use original batch mode instead of streaming mode.
 ```

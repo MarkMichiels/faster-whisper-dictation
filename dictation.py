@@ -5,6 +5,7 @@ import queue
 import argparse
 import platform
 import subprocess
+import re
 import pyaudio
 import numpy as np
 from faster_whisper import WhisperModel
@@ -18,6 +19,110 @@ from transitions import Machine
 # BatchApp.start so the momentary hotkey selection sets the language every
 # session without the combo-mode toggle() path resetting a forced -l language.
 _UNSET = object()
+
+# ---------------------------------------------------------------------------
+# Output hygiene: hallucination filter + horizontal-rule guard
+# ---------------------------------------------------------------------------
+#
+# Whisper was trained on subtitled video, so a chunk without real speech does
+# not decode to an empty string -- it decodes to the most likely *subtitle* for
+# silence. On this machine (nl, large-v3) that is a small, stable set: a
+# broadcaster ident, a sign-off, and a literal '***' filler. Measured over 60
+# days of journal output: 93x '***', 29x 'TV Gelderland 2021', 33x a
+# 'dank u/je wel' variant, nearly all on chunks shorter than two seconds.
+#
+# First line of defence is vad_filter on the transcribe call, so silence never
+# reaches the decoder. This list is the second net, for chunks carrying just
+# enough noise to pass VAD. Only a chunk that is *entirely* one of these
+# phrases is dropped, never a phrase inside a real sentence, and every drop is
+# printed so nothing disappears silently from the journal.
+HALLUCINATION_PHRASES = (
+    'tv gelderland 2021',
+    'dank u wel',
+    'dank je wel',
+    'dankjewel',
+    'dank u wel voor het kijken',
+    'dank je wel voor het kijken',
+    'bedankt voor het kijken',
+    'dank u wel voor het luisteren',
+    'ondertiteling door de amara.org gemeenschap',
+    'ondertiteld door de amara.org gemeenschap',
+    'ondertiteling',
+    'muziek',
+    'applaus',
+    'thank you for watching',
+    'thanks for watching',
+    'subtitles by the amara.org community',
+)
+
+# A run of three or more of these characters renders as a horizontal rule in
+# Markdown (and as a table separator, setext heading or bullet elsewhere), so a
+# dictated pause must never survive as an unbroken run.
+_RULE_RUN_RE = re.compile(r'([*\-_=~#])\1{2,}')
+
+# Dots are handled separately: they never form a Markdown rule on their own,
+# but a dictated pause still gets auto-formatted into a dash by editors and
+# chat clients. --ellipsis-style decides what a pause becomes.
+_ELLIPSIS_RE = re.compile(r'\.{3,}|\u2026+')
+
+
+def _phrase_key(text):
+    """Normalise a chunk for comparison: lowercase, letters/digits only."""
+    return re.sub(r'[^a-z0-9]+', ' ', text.lower()).strip()
+
+
+_HALLUCINATION_KEYS = frozenset(_phrase_key(p) for p in HALLUCINATION_PHRASES)
+
+
+def is_hallucination(text):
+    """True when the whole chunk is a known silence artefact rather than speech."""
+    stripped = text.strip()
+    if not stripped:
+        return False
+    # A chunk of pure punctuation ('***', '...', '.') carries no words at all.
+    if not re.search(r'[a-zA-Z0-9]', stripped):
+        return True
+    return _phrase_key(stripped) in _HALLUCINATION_KEYS
+
+
+def break_rule_runs(text):
+    """Space out '...', '***', '---' so a dictated pause cannot render as a line."""
+    def space_out(match):
+        run = match.group(0)
+        return ' '.join(run)
+    return _RULE_RUN_RE.sub(space_out, text)
+
+
+def format_ellipsis(text, style='space'):
+    """Render a dictated pause so no formatter can turn it into a line.
+
+    space  -> '. . .'  (a visible pause, impossible to read as a rule)
+    single -> '\u2026'      (one ellipsis character, same protection, tidier prose)
+    keep   -> unchanged
+    """
+    if style == 'keep':
+        return text
+    replacement = '\u2026' if style == 'single' else '. . .'
+    return _ELLIPSIS_RE.sub(replacement, text)
+
+
+def sanitize_transcript(text, drop_phrases=True, space_runs=True, ellipsis_style='space'):
+    """Clean one transcribed chunk before it is typed.
+
+    Returns '' when the chunk should not be typed at all.
+    """
+    if drop_phrases and is_hallucination(text):
+        print('[filter] Dropped silence artefact: %r' % text.strip())
+        return ''
+    cleaned = text
+    if space_runs:
+        cleaned = break_rule_runs(cleaned)
+    cleaned = format_ellipsis(cleaned, ellipsis_style)
+    if cleaned != text:
+        print('[filter] Rewrote pause run: %r -> %r' % (text.strip(), cleaned.strip()))
+    return cleaned
+
+
 
 
 
@@ -74,10 +179,14 @@ else:
 # ---------------------------------------------------------------------------
 
 class SpeechTranscriber:
-    def __init__(self, callback, model_size='base', device='cpu', compute_type="int8", language=None):
+    def __init__(self, callback, model_size='base', device='cpu', compute_type="int8", language=None,
+                 vad_filter=True):
         self.callback = callback
         self.model = WhisperModel(model_size, device=device, compute_type=compute_type)
         self.language = language
+        # Same silence gate as streaming mode, so batch mode does not decode a
+        # subtitle artefact out of a long trailing pause.
+        self.vad_filter = vad_filter
 
     def transcribe(self, event):
         print('Transcribing...')
@@ -85,10 +194,11 @@ class SpeechTranscriber:
         if audio is not None:
             # Force language if specified, otherwise auto-detect
             if self.language:
-                segments, info = self.model.transcribe(audio, beam_size=5, language=self.language)
+                segments, info = self.model.transcribe(audio, beam_size=5, language=self.language,
+                                                       vad_filter=self.vad_filter)
                 print("Using forced language: '%s'" % self.language)
             else:
-                segments, info = self.model.transcribe(audio, beam_size=5)
+                segments, info = self.model.transcribe(audio, beam_size=5, vad_filter=self.vad_filter)
                 print("Detected language '%s' with probability %f" % (info.language, info.language_probability))
             self.callback(segments=segments)
         else:
@@ -426,7 +536,8 @@ class TranscriptionWorker:
     """Loads Whisper model once and transcribes audio chunks from a queue."""
 
     def __init__(self, model_size='base', device='cpu', compute_type='int8', language=None,
-                 context_chars=500):
+                 context_chars=500, vad_filter=True, filter_hallucinations=True,
+                 space_rule_runs=True, ellipsis_style='space'):
         print('Loading Whisper model: %s (device=%s, compute=%s)' % (model_size, device, compute_type))
         self.model = WhisperModel(model_size, device=device, compute_type=compute_type)
         self.language = language
@@ -436,6 +547,14 @@ class TranscriptionWorker:
         # well under that). 0 disables.
         self.context_chars = context_chars
         self._context = ''
+        # Silence never reaches the decoder: without this a chunk of room tone
+        # decodes to a subtitle artefact ('***', 'TV Gelderland 2021'). Measured
+        # on this machine: with an initial_prompt set, no_speech_prob collapses
+        # to ~0.08 on pure silence, so it cannot be used as the gate instead.
+        self.vad_filter = vad_filter
+        self.filter_hallucinations = filter_hallucinations
+        self.space_rule_runs = space_rule_runs
+        self.ellipsis_style = ellipsis_style
 
     def reset_context(self):
         """Forget the rolling context (new session or language switch)."""
@@ -446,9 +565,11 @@ class TranscriptionWorker:
         prompt = self._context if (self.context_chars and self._context) else None
         if self.language:
             segments, info = self.model.transcribe(audio_fp32, beam_size=5, language=self.language,
-                                                   initial_prompt=prompt)
+                                                   initial_prompt=prompt,
+                                                   vad_filter=self.vad_filter)
         else:
-            segments, info = self.model.transcribe(audio_fp32, beam_size=5, initial_prompt=prompt)
+            segments, info = self.model.transcribe(audio_fp32, beam_size=5, initial_prompt=prompt,
+                                                   vad_filter=self.vad_filter)
             print("Detected language '%s' with probability %f" % (info.language, info.language_probability))
 
         text = ''
@@ -458,6 +579,13 @@ class TranscriptionWorker:
                 seg_text = seg_text[1:]
             text += seg_text
 
+        text = sanitize_transcript(text,
+                                   drop_phrases=self.filter_hallucinations,
+                                   space_runs=self.space_rule_runs,
+                                   ellipsis_style=self.ellipsis_style)
+
+        # A dropped artefact must not enter the rolling prompt either: feeding
+        # 'TV Gelderland 2021' back as context makes the next chunk repeat it.
         if self.context_chars and text.strip():
             self._context = (self._context + ' ' + text.strip()).strip()[-self.context_chars:]
 
@@ -620,6 +748,8 @@ class KeyboardReplayer():
             if text == '' and segment_text.startswith(' '):
                 segment_text = segment_text[1:]
             text += segment_text
+
+        text = sanitize_transcript(text)
 
         if text:
             self.type_text(text)
@@ -860,6 +990,31 @@ Set to 0 to disable auto-stop. Default: 10 seconds.''')
 Use original batch mode: record all audio first, then transcribe, then type.
 By default, streaming mode with VAD is used for real-time feedback.''')
 
+    parser.add_argument('--no-transcribe-vad', action='store_true',
+                        help='''\
+Disable the VAD gate on the transcribe call. By default silence-only audio is
+removed before decoding, which is what stops Whisper from emitting subtitle
+artefacts ('***', 'TV Gelderland 2021', 'Dank u wel.') for a pause. Only turn
+this off when debugging a suspected dropped word.''')
+
+    parser.add_argument('--no-hallucination-filter', action='store_true',
+                        help='''\
+Disable the phrase filter that drops a chunk consisting entirely of a known
+silence artefact (see HALLUCINATION_PHRASES). Text inside a real sentence is
+never touched; each drop is logged as [filter].''')
+
+    parser.add_argument('--no-space-rule-runs', action='store_true',
+                        help='''\
+Disable spacing of character runs. By default '***' is typed as '* * *' and
+'---' as '- - -', so dictated punctuation can never render as a horizontal
+rule, table separator or heading underline in Markdown.''')
+
+    parser.add_argument('--ellipsis-style', choices=['space', 'single', 'keep'], default='space',
+                        help='''\
+How a dictated pause ('...') is typed. 'space' writes '. . .' so no editor or
+chat client can auto-format it into a dash; 'single' writes one ellipsis
+character; 'keep' leaves it as typed. Default: space.''')
+
     args = parser.parse_args()
     return args
 
@@ -892,7 +1047,9 @@ class BatchApp():
         self.m = m
         self.args = args
         self.recorder    = Recorder(m.finish_recording)
-        self.transcriber = SpeechTranscriber(m.finish_transcribing, args.model_name, args.device, args.compute_type, args.language)
+        self.transcriber = SpeechTranscriber(m.finish_transcribing, args.model_name, args.device,
+                                             args.compute_type, args.language,
+                                             vad_filter=not args.no_transcribe_vad)
         self.replayer    = KeyboardReplayer(m.finish_replaying)
         self.timer = None
 
@@ -1006,6 +1163,10 @@ class App():
         self.transcription_worker = TranscriptionWorker(
             args.model_name, args.device, args.compute_type, args.language,
             context_chars=args.context_chars,
+            vad_filter=not args.no_transcribe_vad,
+            filter_hallucinations=not args.no_hallucination_filter,
+            space_rule_runs=not args.no_space_rule_runs,
+            ellipsis_style=args.ellipsis_style,
         )
         self.replayer = KeyboardReplayer()
         self.recorder = None  # created fresh each session
