@@ -133,19 +133,18 @@ many short segments, so these appeared regularly in the middle of dictated text
 (measured over 60 days on one machine: 93x `***`, 30x `TV Gelderland 2021`, 41x
 a "dank u/je wel" variant). Two defences run by default:
 
-- **VAD gate on transcription** (`vad_filter`): silence is removed before the
-  decoder sees it, so there is nothing to hallucinate from. Note that
-  `no_speech_prob` cannot be used for this instead: with a rolling
-  `initial_prompt` set it collapses from 0.88 to 0.08 on pure silence.
-- **Phrase filter** (`HALLUCINATION_PHRASES`): drops a chunk that is *entirely*
-  a known artefact. A phrase inside a real sentence is never touched, and every
-  drop is logged as `[filter]`. Dropped text also never enters the rolling
+- **Phrase filter** (`HALLUCINATION_PHRASES`), on by default: drops a chunk that
+  is *entirely* a known artefact. It runs after decoding and cannot alter a
+  single recognised word. A phrase inside a real sentence is never touched, and
+  every drop is logged as `[filter]`. Dropped text also never enters the rolling
   context, which would otherwise prompt the next chunk to repeat it.
-
-Removing silence shifts segment boundaries, so on noisy far-field recordings a
-few unclear passages may decode slightly differently (neither version was
-better in testing; close-mic dictation is unaffected). Use
-`--no-transcribe-vad` to rule out the gate when investigating a dropped word.
+- **VAD gate on transcription** (`--transcribe-vad`), off by default: removes
+  silence before the decoder sees it, killing the artefacts at the source. It
+  also shifts segment boundaries, which changed 3 of 10 blocks on noisy
+  far-field speech (neither version better), so it is opt-in — recognition
+  quality outranks removing the artefact at the source. Note that
+  `no_speech_prob` cannot serve as a gate either: with a rolling
+  `initial_prompt` set it collapses from 0.88 to 0.08 on pure silence.
 
 Dictated punctuation is also made safe for Markdown: runs of `* - _ = ~ #` are
 spaced out (`***` -> `* * *`) so they cannot render as a horizontal rule, table
@@ -278,10 +277,11 @@ python3 dictation.py [-h] [-m MODEL_NAME] [-k KEY_COMBO] [-d DOUBLE_KEY]
                         into a dash, 'single' writes one ellipsis character,
                         'keep' leaves it unchanged. Default: space.
 
-  --no-transcribe-vad   Disable the VAD gate on the transcribe call. On by
-                        default; this is what stops subtitle artefacts being
-                        decoded out of silence. Only for debugging suspected
-                        dropped words.
+  --transcribe-vad      Gate the transcribe call with VAD, removing silence
+                        before decoding. Off by default: it kills the artefacts
+                        at the source but shifts segment boundaries and can
+                        change how unclear passages are recognised. Enable only
+                        if a new artefact slips past the phrase filter.
 
   --no-hallucination-filter
                         Disable the phrase filter for chunks that are entirely a

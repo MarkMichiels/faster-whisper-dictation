@@ -180,12 +180,11 @@ else:
 
 class SpeechTranscriber:
     def __init__(self, callback, model_size='base', device='cpu', compute_type="int8", language=None,
-                 vad_filter=True):
+                 vad_filter=False):
         self.callback = callback
         self.model = WhisperModel(model_size, device=device, compute_type=compute_type)
         self.language = language
-        # Same silence gate as streaming mode, so batch mode does not decode a
-        # subtitle artefact out of a long trailing pause.
+        # Same opt-in silence gate as streaming mode (see TranscriptionWorker).
         self.vad_filter = vad_filter
 
     def transcribe(self, event):
@@ -536,7 +535,7 @@ class TranscriptionWorker:
     """Loads Whisper model once and transcribes audio chunks from a queue."""
 
     def __init__(self, model_size='base', device='cpu', compute_type='int8', language=None,
-                 context_chars=500, vad_filter=True, filter_hallucinations=True,
+                 context_chars=500, vad_filter=False, filter_hallucinations=True,
                  space_rule_runs=True, ellipsis_style='space'):
         print('Loading Whisper model: %s (device=%s, compute=%s)' % (model_size, device, compute_type))
         self.model = WhisperModel(model_size, device=device, compute_type=compute_type)
@@ -547,10 +546,15 @@ class TranscriptionWorker:
         # well under that). 0 disables.
         self.context_chars = context_chars
         self._context = ''
-        # Silence never reaches the decoder: without this a chunk of room tone
-        # decodes to a subtitle artefact ('***', 'TV Gelderland 2021'). Measured
-        # on this machine: with an initial_prompt set, no_speech_prob collapses
-        # to ~0.08 on pure silence, so it cannot be used as the gate instead.
+        # Off by default, deliberately. Gating the decoder with VAD does remove
+        # the subtitle artefacts at the source, but it also strips silence from
+        # the audio and so shifts segment boundaries: measured on 5 minutes of
+        # noisy far-field speech, 3 of 10 blocks decoded differently (neither
+        # version better). The chunking in this app is heavily tuned for
+        # continuous dictation, so recognition quality wins over elegance --
+        # the artefacts are removed after the fact by sanitize_transcript,
+        # which cannot alter a single recognised word. Enable with
+        # --transcribe-vad only if the phrase filter proves insufficient.
         self.vad_filter = vad_filter
         self.filter_hallucinations = filter_hallucinations
         self.space_rule_runs = space_rule_runs
@@ -992,10 +996,16 @@ By default, streaming mode with VAD is used for real-time feedback.''')
 
     parser.add_argument('--no-transcribe-vad', action='store_true',
                         help='''\
-Disable the VAD gate on the transcribe call. By default silence-only audio is
-removed before decoding, which is what stops Whisper from emitting subtitle
-artefacts ('***', 'TV Gelderland 2021', 'Dank u wel.') for a pause. Only turn
-this off when debugging a suspected dropped word.''')
+Deprecated no-op: the VAD gate is off by default. Kept so existing service
+files and scripts keep working.''')
+
+    parser.add_argument('--transcribe-vad', action='store_true',
+                        help='''\
+Gate the transcribe call with VAD, removing silence before decoding. This stops
+subtitle artefacts at the source, but it also shifts segment boundaries and can
+change how unclear passages are recognised, so it is OFF by default: the phrase
+filter removes the same artefacts afterwards without touching recognition.
+Enable only if a new artefact slips through that the filter does not catch.''')
 
     parser.add_argument('--no-hallucination-filter', action='store_true',
                         help='''\
@@ -1049,7 +1059,7 @@ class BatchApp():
         self.recorder    = Recorder(m.finish_recording)
         self.transcriber = SpeechTranscriber(m.finish_transcribing, args.model_name, args.device,
                                              args.compute_type, args.language,
-                                             vad_filter=not args.no_transcribe_vad)
+                                             vad_filter=args.transcribe_vad)
         self.replayer    = KeyboardReplayer(m.finish_replaying)
         self.timer = None
 
@@ -1163,7 +1173,7 @@ class App():
         self.transcription_worker = TranscriptionWorker(
             args.model_name, args.device, args.compute_type, args.language,
             context_chars=args.context_chars,
-            vad_filter=not args.no_transcribe_vad,
+            vad_filter=args.transcribe_vad,
             filter_hallucinations=not args.no_hallucination_filter,
             space_rule_runs=not args.no_space_rule_runs,
             ellipsis_style=args.ellipsis_style,
