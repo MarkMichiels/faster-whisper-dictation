@@ -31,8 +31,14 @@ app reads button 8 as "go back" — so a press to dictate navigated the app away
 from the page. `free_mouse_thumb_buttons.sh` remaps the thumb buttons onto
 buttons 10 and 11, which carry no default meaning in X, and `install.sh` runs
 it from the service before the listener starts. The listener accepts both
-pairs, so the trigger works with or without the remap. X forgets a button map
-when the mouse is re-plugged; re-run the script by hand in that case.
+pairs, so the trigger works with or without the remap.
+
+X forgets a button map when the device is re-created, so replugging the mouse
+or a USB reset after suspend would restore browser back/forward.
+`watch_mouse_thumb_buttons.sh` therefore waits on udev input-add events and
+re-applies the map; `install.sh` starts it alongside the service, and it exits
+with the service. It blocks on `udevadm monitor` rather than polling, so it
+costs nothing while idle.
 
 ## Prerequisites
 

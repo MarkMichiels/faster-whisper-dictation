@@ -74,6 +74,11 @@ ExecStartPre=/bin/bash -c 'pkill -f "python.*dictation\\\\.py" 2>/dev/null; slee
 # so a press that toggles dictation no longer navigates the focused app.
 ExecStartPre=-$SCRIPT_DIR/free_mouse_thumb_buttons.sh
 
+# X forgets a button map when the device is re-created, so a replugged mouse
+# would silently get browser back/forward again. The watcher re-applies the map
+# on every udev input-add event and exits with the service.
+ExecStartPost=-/bin/bash -c '$SCRIPT_DIR/watch_mouse_thumb_buttons.sh &'
+
 ExecStart=$VENV_DIR/bin/python3 dictation.py -m large-v3 -v cuda -c float16 -l nl -t 0
 
 Restart=on-failure
