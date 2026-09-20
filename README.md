@@ -26,6 +26,14 @@ buttons do the same thing, and two presses within 0.4s count as one, so
 hitting them together is harmless. The buttons keep their normal function
 elsewhere. Change or disable this with `--mouse-buttons`.
 
+X also delivers those presses to the focused window, where every browser-based
+app reads button 8 as "go back" — so a press to dictate navigated the app away
+from the page. `free_mouse_thumb_buttons.sh` remaps the thumb buttons onto
+buttons 10 and 11, which carry no default meaning in X, and `install.sh` runs
+it from the service before the listener starts. The listener accepts both
+pairs, so the trigger works with or without the remap. X forgets a button map
+when the mouse is re-plugged; re-run the script by hand in that case.
+
 ## Prerequisites
 
 ### System packages (Linux)

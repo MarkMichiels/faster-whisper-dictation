@@ -69,6 +69,11 @@ Environment=PYTHONUNBUFFERED=1
 # Kill any orphan instances before starting
 ExecStartPre=/bin/bash -c 'pkill -f "python.*dictation\\\\.py" 2>/dev/null; sleep 0.5; true'
 
+
+# Detach the thumb buttons from browser back/forward before the listener starts,
+# so a press that toggles dictation no longer navigates the focused app.
+ExecStartPre=-$SCRIPT_DIR/free_mouse_thumb_buttons.sh
+
 ExecStart=$VENV_DIR/bin/python3 dictation.py -m large-v3 -v cuda -c float16 -l nl -t 0
 
 Restart=on-failure

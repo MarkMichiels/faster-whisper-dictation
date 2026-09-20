@@ -1081,14 +1081,17 @@ rule, table separator or heading underline in Markdown.''')
 How a dictated pause ('...') is typed. 'space' writes '. . .' so no editor or
 chat client can auto-format it into a dash; 'single' writes one ellipsis
 character; 'keep' leaves it as typed. Default: space.''')
-    parser.add_argument('--mouse-buttons', type=str, default='button8,button9',
+    parser.add_argument('--mouse-buttons', type=str, default='button8,button9,button10,button11',
                         help='''\
 Comma-separated pynput mouse buttons that toggle dictation, so a session can be
 started without letting go of the mouse. Every listed button does the same
 thing: press once to start, press again to stop. Presses within 0.4s of each
 other count as one, so hitting both thumb buttons together is harmless.
-The button keeps its normal function in other apps (browser back/forward).
-Set to an empty string to disable. Default: button8,button9.''')
+button8/button9 are the thumb buttons as the kernel reports them; button10/11
+are what they become once X remaps them away from browser back/forward (see
+the xinput set-button-map line in install.sh), so both pairs are listed and
+the trigger survives with or without that remap.
+Set to an empty string to disable. Default: button8,button9,button10,button11.''')
 
     args = parser.parse_args()
     return args
