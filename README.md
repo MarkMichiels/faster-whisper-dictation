@@ -303,10 +303,14 @@ Run the included install script:
 This installs a **systemd user service** (`spraakherkenning.service`) that starts
 dictation automatically on login. The service includes:
 
+- **Graphical-session lifecycle** — starts only when the real GNOME graphical
+  session is ready and stops at logout
 - **Duplicate prevention** — kills orphan instances before starting (`ExecStartPre`)
 - **Restart on crash** — automatic restart after 5 seconds on failure
 - **CUDA library paths** — auto-detected from the venv
 - **DISPLAY forwarding** — for pynput hotkey listener on X11
+- **Revision check** — records the installed Git revision so interrupted
+  cross-machine updates can be detected and repaired
 
 > **Note:** Previous versions used a `.desktop` file in `~/.config/autostart/`.
 > This caused duplicate instances because both GNOME session and systemd's
@@ -320,18 +324,23 @@ systemctl --user status spraakherkenning   # Check status
 systemctl --user restart spraakherkenning  # Restart after config change
 systemctl --user stop spraakherkenning     # Stop temporarily
 journalctl --user -u spraakherkenning -f   # Follow logs
+./install.sh --check                       # Verify unit, revision and runtime
 ```
 
 ### Updating an existing installation
 
-After `git pull`, re-run install and restart:
+After `git pull`, re-run the installer. It refreshes the unit and restarts the
+service; a separate restart is unnecessary:
 
 ```bash
 cd ~/Repositories/faster-whisper-dictation
 git pull
 ./install.sh
-systemctl --user restart spraakherkenning
 ```
+
+`./install.sh --check` is read-only. It fails when the venv or installed unit is
+missing, the installed revision is stale, the old `default.target` link still
+exists, the graphical-session link is missing, or the service is inactive.
 
 ## Troubleshooting (Linux)
 
@@ -358,6 +367,24 @@ Verify with:
 ps aux | grep "dictation.py" | grep -v grep
 
 # Should show the service running
+systemctl --user status spraakherkenning
+```
+
+### Service is inactive immediately after login
+
+**Historical cause (fixed 2026-09-20):** the service used to be enabled for
+`default.target` while also declaring `Requires=graphical-session.target`.
+During some GNOME logins that pulled the graphical target into the early user
+manager transaction. GNOME stopped that provisional target moments later, sent
+SIGTERM to dictation, and reached the real graphical target only afterwards.
+Because the stop was clean, `Restart=on-failure` did not recover it.
+
+The service now uses `PartOf=graphical-session.target` and is enabled directly
+for that target. Re-run `./install.sh` once on every existing machine to remove
+the legacy `default.target` link and install the corrected lifecycle. Verify:
+
+```bash
+./install.sh --check
 systemctl --user status spraakherkenning
 ```
 
