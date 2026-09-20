@@ -13,10 +13,18 @@ Multilingual dictation app based on the Faster Whisper to provide accurate and e
 | **Start recording** | Double-tap `Ctrl_R` | Double-tap `Cmd_R` | `Win+Z` |
 | **Stop recording** | Single tap `Ctrl_R` | Single tap `Cmd_R` | `Win+Z` |
 | **Toggle language** | Double-tap `AltGr` | — | — |
+| **Start/stop from the mouse** | Either thumb button | Either thumb button | Either thumb button |
 
 3. Start speaking. Text appears in real-time after each natural pause (~1 second of silence).
 4. When you stop speaking for 10 seconds, the session ends automatically (double beep).
    Or tap the key again to stop manually (single beep).
+
+With a hand already on the mouse, reaching for `Ctrl_R` costs a hand movement,
+so either thumb button (`button8`/`button9`, normally browser back/forward)
+toggles dictation as well: press once to start, press again to stop. Both
+buttons do the same thing, and two presses within 0.4s count as one, so
+hitting them together is harmless. The buttons keep their normal function
+elsewhere. Change or disable this with `--mouse-buttons`.
 
 ## Prerequisites
 
@@ -203,6 +211,16 @@ python3 dictation.py [-h] [-m MODEL_NAME] [-k KEY_COMBO] [-d DOUBLE_KEY]
                      [--context-chars N] [--auto-stop-silence S] [--batch-mode]
 
   -h, --help            show this help message and exit
+
+  --mouse-buttons BUTTONS
+                        Comma-separated pynput mouse buttons that toggle
+                        dictation, so a session can start without letting go of
+                        the mouse. Every listed button does the same thing:
+                        press once to start, press again to stop. Presses
+                        within 0.4s count as one, so pressing both thumb
+                        buttons together is harmless. The button keeps its
+                        normal function in other apps. Empty string disables.
+                        Default: button8,button9.
 
   -m MODEL_NAME, --model-name MODEL_NAME
                         Size of the model to use (tiny, tiny.en, base, base.en,

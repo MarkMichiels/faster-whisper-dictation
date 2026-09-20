@@ -11,6 +11,7 @@ import numpy as np
 from faster_whisper import WhisperModel
 from faster_whisper.vad import get_speech_timestamps, VadOptions, get_vad_model
 from pynput import keyboard
+from pynput import mouse
 from transitions import Machine
 
 
@@ -882,6 +883,62 @@ class MultiTapKeyListener():
             listener.join()
 
 
+class MouseToggleListener():
+    """Toggle dictation from the mouse side buttons.
+
+    The keyboard trigger needs two hands: one on the mouse, one reaching for
+    Ctrl_R. The thumb buttons are always under the hand that is already
+    holding the mouse, so they carry the same start/stop action.
+
+    Every configured button does the same thing -- there is no forward/back
+    distinction here. A press starts a session when idle and stops it when
+    recording, exactly like a double/single tap on Ctrl_R.
+
+    Both thumb buttons pressed together (or one button bouncing) would
+    otherwise read as start-then-immediate-stop, so presses inside
+    COALESCE_WINDOW after an accepted press are swallowed.
+
+    The listener does not suppress the button, so a browser still sees its
+    normal back/forward navigation.
+    """
+
+    COALESCE_WINDOW = 0.4   # seconds; a second press inside this is the same intent
+
+    def __init__(self, toggle_callback, button_names):
+        self.toggle_callback = toggle_callback
+        self.buttons = set()
+        for raw in button_names:
+            name = raw.strip()
+            if not name:
+                continue
+            button = getattr(mouse.Button, name, None)
+            if button is None:
+                print('[mouse] Unknown button %r, ignored' % name)
+                continue
+            self.buttons.add(button)
+        self.last_fire_time = 0.0
+
+    def on_click(self, x, y, button, pressed):
+        if not pressed or button not in self.buttons:
+            return
+        now = time.time()
+        if now - self.last_fire_time < self.COALESCE_WINDOW:
+            return
+        self.last_fire_time = now
+        self.toggle_callback()
+
+    def start(self):
+        """Run the listener on its own daemon thread (non-blocking)."""
+        if not self.buttons:
+            return None
+        listener = mouse.Listener(on_click=self.on_click)
+        listener.daemon = True
+        listener.start()
+        print('Mouse toggle: %s starts/stops dictation.'
+              % ', '.join(sorted(b.name for b in self.buttons)))
+        return listener
+
+
 def parse_args():
     parser = argparse.ArgumentParser(description='Dictation app powered by Faster whisper')
     parser.add_argument('-m', '--model-name', type=str, default='base',
@@ -1024,6 +1081,14 @@ rule, table separator or heading underline in Markdown.''')
 How a dictated pause ('...') is typed. 'space' writes '. . .' so no editor or
 chat client can auto-format it into a dash; 'single' writes one ellipsis
 character; 'keep' leaves it as typed. Default: space.''')
+    parser.add_argument('--mouse-buttons', type=str, default='button8,button9',
+                        help='''\
+Comma-separated pynput mouse buttons that toggle dictation, so a session can be
+started without letting go of the mouse. Every listed button does the same
+thing: press once to start, press again to stop. Presses within 0.4s of each
+other count as one, so hitting both thumb buttons together is harmless.
+The button keeps its normal function in other apps (browser back/forward).
+Set to an empty string to disable. Default: button8,button9.''')
 
     args = parser.parse_args()
     return args
@@ -1138,6 +1203,8 @@ class BatchApp():
             key = self.args.key_combo or '<win>+z'
             keylistener= KeyListener(self.toggle, normalize_key_names(key))
             self.m.on_enter_READY(lambda *_: print("Press ", key, " to start/stop recording."))
+        self.mouse_listener = MouseToggleListener(
+            self.toggle, (self.args.mouse_buttons or '').split(',')).start()
         self.m.to_READY()
         keylistener.run()
 
@@ -1405,6 +1472,9 @@ class App():
             key = self.args.key_combo or '<win>+z'
             keylistener = KeyListener(self.toggle, normalize_key_names(key))
             print("Press ", key, " to start/stop recording.")
+
+        self.mouse_listener = MouseToggleListener(
+            self.toggle, (self.args.mouse_buttons or '').split(',')).start()
 
         keylistener.run()
 
