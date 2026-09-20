@@ -33,6 +33,13 @@ buttons 10 and 11, which carry no default meaning in X, and `install.sh` runs
 it from the service before the listener starts. The listener accepts both
 pairs, so the trigger works with or without the remap.
 
+The script names no device: it remaps every physical pointer with at least
+nine buttons and builds each map from that device's own button count, so a
+machine with a different mouse, or a mouse with extra buttons, needs no edit.
+A pointer with fewer than nine buttons has no thumb buttons to free and is
+skipped, as are X's virtual core and XTEST pointers. Pass a device name or id
+to limit the run to one device.
+
 X forgets a button map when the device is re-created, so replugging the mouse
 or a USB reset after suspend would restore browser back/forward.
 `watch_mouse_thumb_buttons.sh` therefore waits on udev input-add events and
