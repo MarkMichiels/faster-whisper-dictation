@@ -66,8 +66,9 @@ Environment=DICTATION_REVISION=$REVISION
 # from the journal (Python block-buffers stdout under systemd otherwise).
 Environment=PYTHONUNBUFFERED=1
 
-# Kill any orphan instances before starting
-ExecStartPre=/bin/bash -c 'pkill -f "python.*dictation\\\\.py" 2>/dev/null; sleep 0.5; true'
+# No pattern-based pre-kill: systemd owns the lifecycle and stops every
+# process in this unit's cgroup. A pkill -f pattern also matched unrelated
+# shells and agent sessions whose command line merely mentioned dictation.py.
 
 
 # Detach the thumb buttons from browser back/forward before the listener starts,
