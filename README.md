@@ -347,7 +347,10 @@ dictation automatically on login. The service includes:
 - **Duplicate prevention** — kills orphan instances before starting (`ExecStartPre`)
 - **Restart on crash** — automatic restart after 5 seconds on failure
 - **CUDA library paths** — auto-detected from the venv
-- **DISPLAY forwarding** — for pynput hotkey listener on X11
+- **Session DISPLAY** — inherits `DISPLAY`/`XAUTHORITY` from the Xorg login
+  session (no hardcoded display number, so automatic login on `:0` works)
+- **Xorg required** — pynput only sees global input under Xorg; under Wayland
+  the service warns at startup. Set `WaylandEnable=false` in `/etc/gdm3/custom.conf`
 - **Revision check** — records the installed Git revision so interrupted
   cross-machine updates can be detected and repaired
 

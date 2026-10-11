@@ -1,4 +1,5 @@
 import enum
+import os
 import time
 import threading
 import queue
@@ -1482,7 +1483,21 @@ class App():
         keylistener.run()
 
 
+def warn_if_wayland():
+    """Say plainly when global triggers cannot work in this session.
+
+    pynput listens through X. Under a Wayland session it only sees input that
+    goes to Xwayland windows, so Ctrl_R and the thumb buttons stay silent in
+    every native Wayland app while the service still looks active.
+    """
+    if os.environ.get('XDG_SESSION_TYPE') == 'wayland':
+        print('WARNING: Wayland session detected. The hotkey and mouse buttons '
+              'only work in X11 windows. Log in with "Ubuntu on Xorg" '
+              '(or set WaylandEnable=false in /etc/gdm3/custom.conf).')
+
+
 if __name__ == "__main__":
+    warn_if_wayland()
     args = parse_args()
     if args.batch_mode:
         print('Using batch mode (original behaviour)')

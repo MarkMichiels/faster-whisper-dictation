@@ -55,8 +55,11 @@ WorkingDirectory=$SCRIPT_DIR
 # CUDA libraries for faster-whisper GPU inference
 Environment=LD_LIBRARY_PATH=$LD_PATH
 
-# DISPLAY needed for pynput global hotkey listener on X11
-Environment=DISPLAY=:1
+# DISPLAY and XAUTHORITY come from the login session: on Xorg,
+# /etc/X11/Xsession.d/20dbus_xdg-runtime pushes both into the systemd user
+# manager before graphical-session.target starts. A hardcoded DISPLAY=:1 only
+# matched a password login after an Xorg greeter; with automatic login the
+# session gets :0 and the listener would attach to the wrong server or none.
 
 # Records which checked-out revision generated the installed unit. This lets
 # setup_workspace.sh detect a pull whose install step was interrupted.
