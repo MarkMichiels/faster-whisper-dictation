@@ -16,6 +16,9 @@ from pynput import mouse
 from transitions import Machine
 from coverage_ledger import CoverageLedger, diagnostic, MAX_SECONDS, RATE
 
+# PortAudio paInputOverflowed: input samples were dropped by the driver.
+INPUT_OVERFLOWED_ERRNO = -9981  # pyaudio.paInputOverflowed
+
 
 # Sentinel: distinguishes "caller passed no language" (keep current) from an
 # explicit language=None ("auto-detect this session"). Used by App.start /
@@ -382,9 +385,20 @@ class StreamingRecorder:
                 self.ledger.incident('capture_start_delay', seconds=latency)
         try:
             while self.recording:
-                # Surface overflow instead of silently accepting missing input.
+                # Surface overflow instead of silently accepting missing input,
+                # but keep recording: stopping on an overflow would lose far
+                # more speech than the overflow itself.
                 try:
                     data = stream.read(self.FRAMES_PER_BUFFER, exception_on_overflow=True)
+                except OSError as exc:
+                    if getattr(exc, 'errno', None) != INPUT_OVERFLOWED_ERRNO:
+                        if self.ledger:
+                            self.ledger.incident('capture_error', error=str(exc))
+                        threading.Thread(target=self.on_auto_stop, daemon=True).start()
+                        break
+                    # Log only: a notification per overflow would flood the desktop.
+                    diagnostic('capture_overflow', error=str(exc))
+                    continue
                 except Exception as exc:
                     if self.ledger:
                         self.ledger.incident('capture_error', error=str(exc))
