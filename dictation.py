@@ -14,6 +14,7 @@ from faster_whisper.vad import get_speech_timestamps, VadOptions, get_vad_model
 from pynput import keyboard
 from pynput import mouse
 from transitions import Machine
+from coverage_ledger import CoverageLedger, diagnostic, MAX_SECONDS, RATE
 
 
 # Sentinel: distinguishes "caller passed no language" (keep current) from an
@@ -286,8 +287,10 @@ class StreamingRecorder:
 
     def __init__(self, transcription_queue, silence_ms=1000,
                  auto_stop_silence_s=10, on_auto_stop=None,
-                 min_chunk_s=2.5, max_chunk_s=10, eager_prob=0.35):
+                 min_chunk_s=2.5, max_chunk_s=10, eager_prob=0.35, ledger=None):
         self.transcription_queue = transcription_queue
+        self.ledger = ledger
+        self._buffer_offset = 0
         self.silence_ms = silence_ms
         self.auto_stop_silence_s = auto_stop_silence_s
         self.on_auto_stop = on_auto_stop
@@ -331,6 +334,7 @@ class StreamingRecorder:
         self.recording = True
         self._raw_frames = []
         self._vad_processed_samples = 0
+        self._buffer_offset = 0
 
         self._rec_thread = threading.Thread(target=self._record_loop, daemon=True)
         self._vad_thread = threading.Thread(target=self._vad_loop, daemon=True)
@@ -353,29 +357,59 @@ class StreamingRecorder:
             if remaining is not None and len(remaining) > self._vad_processed_samples:
                 leftover = remaining[self._vad_processed_samples:]
                 print('[flush] Sending remaining %.1fs audio' % (len(leftover) / self.SAMPLE_RATE))
-                self.transcription_queue.put((leftover, True))
+                self._enqueue(leftover, True, self._vad_processed_samples)
 
             self.transcription_queue.put(None)
 
     def _record_loop(self):
         """PyAudio recording loop — runs in its own thread."""
         p = pyaudio.PyAudio()
-        stream = p.open(
-            format=pyaudio.paInt16,
-            channels=1,
-            rate=self.SAMPLE_RATE,
-            frames_per_buffer=self.FRAMES_PER_BUFFER,
-            input=True,
-        )
+        try:
+            stream = p.open(
+                format=pyaudio.paInt16, channels=1, rate=self.SAMPLE_RATE,
+                frames_per_buffer=self.FRAMES_PER_BUFFER, input=True)
+        except Exception as exc:
+            p.terminate()
+            if self.ledger:
+                self.ledger.incident('capture_open_error', error=str(exc))
+            threading.Thread(target=self.on_auto_stop, daemon=True).start()
+            return
 
-        while self.recording:
-            data = stream.read(self.FRAMES_PER_BUFFER, exception_on_overflow=False)
-            with self._buffer_lock:
-                self._raw_frames.append(data)
+        if self.ledger:
+            latency = time.time() - self.ledger.started
+            diagnostic('capture_ready', start_latency_seconds=latency)
+            if latency > 0.5:
+                self.ledger.incident('capture_start_delay', seconds=latency)
+        try:
+            while self.recording:
+                # Surface overflow instead of silently accepting missing input.
+                try:
+                    data = stream.read(self.FRAMES_PER_BUFFER, exception_on_overflow=True)
+                except Exception as exc:
+                    if self.ledger:
+                        self.ledger.incident('capture_error', error=str(exc))
+                    threading.Thread(target=self.on_auto_stop, daemon=True).start()
+                    break
+                if self.ledger:
+                    data = self.ledger.capture(data)
+                with self._buffer_lock:
+                    if data:
+                        self._raw_frames.append(data)
+                if self.ledger and self.ledger.samples >= MAX_SECONDS * RATE:
+                    self.ledger.incident('duration_limit', seconds=MAX_SECONDS)
+                    threading.Thread(target=self.on_auto_stop, daemon=True).start()
+                    break
+        finally:
+            stream.stop_stream()
+            stream.close()
+            p.terminate()
+        return
 
-        stream.stop_stream()
-        stream.close()
-        p.terminate()
+    def _enqueue(self, audio, boundary, start):
+        if getattr(self, 'ledger', None):
+            self.transcription_queue.put((audio.copy(), boundary, self._buffer_offset + start))
+        else:
+            self.transcription_queue.put((audio, boundary))
 
     def _vad_loop(self):
         """Periodically check accumulated audio for completed speech segments."""
@@ -457,7 +491,7 @@ class StreamingRecorder:
                     print('[VAD] Speech chunk: %.1fs (samples %d-%d)' % (duration, chunk_start, seg_end))
                     # Boundary: a full >=silence_ms pause followed this segment,
                     # a natural sentence end — flush the paste buffer here.
-                    self.transcription_queue.put((chunk, True))
+                    self._enqueue(chunk, True, chunk_start)
 
                 # Update processed marker to after this segment
                 self._vad_processed_samples = max(self._vad_processed_samples, seg_end)
@@ -480,7 +514,7 @@ class StreamingRecorder:
                         # Not a boundary: only a micro-pause inside fluent speech.
                         # The paste buffer keeps accumulating these until it
                         # reaches paste_min_s, then transcribes them merged.
-                        self.transcription_queue.put((chunk, False))
+                        self._enqueue(chunk, False, self._vad_processed_samples)
                     self._vad_processed_samples = split
 
         self._trim_buffer()
@@ -503,6 +537,7 @@ class StreamingRecorder:
                 return
             del self._raw_frames[:drop_frames]
         self._vad_processed_samples -= drop_frames * self.FRAMES_PER_BUFFER
+        self._buffer_offset = getattr(self, '_buffer_offset', 0) + drop_frames * self.FRAMES_PER_BUFFER
 
     def _speech_probs(self, audio):
         """Per-frame Silero speech probability for audio (one value per
@@ -591,9 +626,9 @@ class TranscriptionWorker:
         """Forget the rolling context (new session or language switch)."""
         self._context = ''
 
-    def transcribe_chunk(self, audio_fp32):
+    def transcribe_chunk(self, audio_fp32, recovery=False):
         """Transcribe a single audio chunk. Returns text string."""
-        prompt = (prompt_text(self._context) or None) if self.context_chars else None
+        prompt = (prompt_text(self._context) or None) if self.context_chars and not recovery else None
         def decode(initial_prompt):
             options = dict(beam_size=5, initial_prompt=initial_prompt,
                            vad_filter=self.vad_filter)
@@ -605,7 +640,7 @@ class TranscriptionWorker:
         duration = len(audio_fp32) / 16000
         text = decode(prompt)
         suspect = suspect_decode(text, duration)
-        if suspect:
+        if suspect and not recovery:
             # Reset BEFORE retry: even a failed retry must break the cascade.
             self.reset_context()
             print('[recovery] Suspect decode (%.1fs audio); retry once without prompt' % duration)
@@ -623,10 +658,11 @@ class TranscriptionWorker:
             except Exception as exc:
                 print('[recovery] Retry failed; retaining first decode: %s' % exc)
             if suspect_decode(text, duration):
-                print('[recovery] Unresolved suspect decode; audio not retained')
+                print('[recovery] Unresolved suspect decode; stop ledger will check')
 
+        self.last_raw = text
         text = sanitize_transcript(text,
-                                   drop_phrases=self.filter_hallucinations,
+                                   drop_phrases=self.filter_hallucinations and not recovery,
                                    space_runs=self.space_rule_runs,
                                    ellipsis_style=self.ellipsis_style)
 
@@ -668,7 +704,7 @@ class KeyboardReplayer():
         even though the clipboard is filled correctly.
         """
         if not self.target_wid:
-            return
+            return False
         for attempt in range(2):
             try:
                 subprocess.run(
@@ -680,11 +716,12 @@ class KeyboardReplayer():
                     ['xdotool', 'getactivewindow'], timeout=2
                 ).decode().strip()
                 if active == self.target_wid:
-                    return
+                    return True
             except Exception:
                 pass
         print('[warn] target window %s did not regain focus — paste may land elsewhere'
               % self.target_wid)
+        return False
 
     def _get_active_window_class(self):
         """Detect active window class via xprop (returns lowercase)."""
@@ -716,30 +753,37 @@ class KeyboardReplayer():
         dictation lands in clipboard history (so it is recoverable even if the
         paste keystroke fails) and lets us paste atomically instead of typing
         character-by-character. CopyQ is preferred because it records history;
-        xclip is the fallback when CopyQ is unavailable. Returns True on success.
+        xclip is the fallback when CopyQ is unavailable. Returns command receipts;
+        success is not an application acknowledgement.
 
         Note: 'copyq copy' sets the clipboard but the monitor skips its own
         writes, so it never reaches history; 'copyq add' records history but
         leaves the clipboard untouched. Both are needed — add for recovery,
         copy for the paste.
         """
+        result = dict(ok=False, path='none', copyq_add=None, copyq_copy=None, xclip=None)
         try:
-            subprocess.run(['copyq', 'add', '--', text], timeout=3,
-                           check=True, stderr=subprocess.DEVNULL)
-            subprocess.run(['copyq', 'copy', '--', text], timeout=3,
-                           check=True, stderr=subprocess.DEVNULL)
+            for action in ('add', 'copy'):
+                command = subprocess.run(['copyq', action, '--', text], timeout=3,
+                                         check=False, stderr=subprocess.DEVNULL)
+                result['copyq_' + action] = command.returncode
+                if command.returncode:
+                    raise RuntimeError('copyq %s rc=%d' % (action, command.returncode))
             time.sleep(0.05)
-            return True
-        except Exception:
-            pass
+            result.update(ok=True, path='copyq')
+            return result
+        except Exception as exc:
+            result['copyq_error'] = str(exc)
+            diagnostic('copyq_failure', **result)
         try:
-            p = subprocess.Popen(['xclip', '-selection', 'clipboard'],
-                                 stdin=subprocess.PIPE)
-            p.communicate(text.encode('utf-8'), timeout=3)
-            time.sleep(0.05)
-            return True
-        except Exception:
-            return False
+            command = subprocess.run(['xclip', '-selection', 'clipboard'],
+                                     input=text.encode('utf-8'), timeout=3, check=False)
+            result['xclip'] = command.returncode
+            result.update(ok=command.returncode == 0, path='xclip')
+        except Exception as exc:
+            result['xclip_error'] = str(exc)
+        diagnostic('clipboard_fallback', **result)
+        return result
 
     def _send_paste(self, terminal):
         """Send the paste shortcut: Ctrl+Shift+V in terminals, Ctrl+V elsewhere."""
@@ -774,16 +818,22 @@ class KeyboardReplayer():
         if not text:
             return
         print(text)
-        self._restore_target_window()
+        focus_ok = self._restore_target_window()
         wm_class = self._get_active_window_class()
         terminal = wm_class in self.TERMINAL_CLASSES
-        if self._set_clipboard(text):
-            print('[clipboard mode - %s%s]'
-                  % (wm_class or 'unknown', ', terminal' if terminal else ''))
-            self._send_paste(terminal)
-        else:
-            print('[pynput fallback - %s - no clipboard tool]' % (wm_class or 'unknown'))
-            self._type_via_pynput(text)
+        result = self._set_clipboard(text)
+        result['paste'] = 'not_sent'
+        result['focus_ok'] = focus_ok
+        if not focus_ok:
+            result['ok'] = False
+        if result['ok']:
+            try:
+                self._send_paste(terminal)
+                result['paste'] = 'shortcut_sent_not_acknowledged'
+            except Exception as exc:
+                result.update(ok=False, paste='failed', paste_error=str(exc))
+        # No unverified character fallback: retained text goes to stop recovery.
+        return result
 
     def replay(self, event):
         """Batch-mode interface (used by transitions state machine)."""
@@ -1328,6 +1378,8 @@ class App():
                 except queue.Empty:
                     break
 
+        self.ledger = CoverageLedger(self._coverage_notice)
+        diagnostic('session_start', max_seconds=MAX_SECONDS, pcm_bytes_per_minute=RATE*2*60)
         # Create fresh recorder and start BEFORE beep so no audio is missed
         self.recorder = StreamingRecorder(
             self.transcription_queue,
@@ -1337,6 +1389,7 @@ class App():
             min_chunk_s=self.args.min_chunk_s,
             max_chunk_s=self.args.max_chunk_s,
             eager_prob=self.args.eager_prob,
+            ledger=self.ledger,
         )
         self.recorder.start()
         self.replayer.capture_target_window()
@@ -1354,10 +1407,10 @@ class App():
         self._transcription_thread.start()
         self._typing_thread.start()
 
-        # Safety timer
-        if self.args.max_time:
-            self.timer = threading.Timer(self.args.max_time, self.timer_stop)
-            self.timer.start()
+        # Hard wall-clock cap as well as the sample-count cap in the recorder.
+        duration = min(self.args.max_time or MAX_SECONDS, MAX_SECONDS)
+        self.timer = threading.Timer(duration, self.timer_stop)
+        self.timer.start()
 
         return True
 
@@ -1393,6 +1446,7 @@ class App():
 
     def timer_stop(self):
         print('Timer stop')
+        self.ledger.incident('timer_stop')
         self._auto_stop()
 
     def toggle_language(self):
@@ -1411,6 +1465,31 @@ class App():
     def toggle(self):
         return self.start() or self.stop()
 
+    def _coverage_notice(self, message):
+        labels = {
+            'decoder_error': 'Decoderfout; controle volgt bij stop.',
+            'capture_error': 'Opname onderbroken; zie journal.',
+            'capture_open_error': 'Microfoon kon niet starten.',
+            'capture_start_delay': 'Microfoon startte vertraagd.',
+            'delivery_degraded': 'Aflevering onzeker; controle bij stop.',
+            'suspect_decode': 'Verdachte herkenning; controle bij stop.',
+            'stop_check': 'Controleert mogelijk gemist stuk.',
+            'corrections_clipboard': 'Mogelijk gemiste tekst staat apart op klembord; plak zelf.',
+            'corrections_delivery_failed': 'Hersteltekst kon niet naar klembord; zie journal.',
+            'duration_warning': 'Opname stopt over een minuut (RAM-grens).',
+            'duration_limit': 'Opname gestopt: maximum 30 minuten.',
+            'timer_stop': 'Opname gestopt door tijdslimiet.',
+            'unresolved': 'Geen hersteltekst gevonden; zie journal.',
+            'recovery_failed': 'Herstelpoging mislukt; zie journal.',
+        }
+        message = labels.get(message.removeprefix('Dictatie: '), message)
+        try:
+            subprocess.run(['notify-send', '--app-name=Dictatie', '--expire-time=6000',
+                            'Dekkingscontrole', message],
+                           timeout=2, check=True, stderr=subprocess.DEVNULL)
+        except Exception as exc:
+            diagnostic('notification_failed', error=str(exc))
+
     def _transcription_loop(self):
         """Consumer: takes audio chunks from transcription_queue, transcribes, puts text on typing_queue.
 
@@ -1426,6 +1505,8 @@ class App():
         paste_min_samples = int(self.args.paste_min_s * StreamingRecorder.SAMPLE_RATE) if self.args.paste_min_s else 0
         pending = []
         pending_samples = 0
+        range_start = 0
+        ledger = getattr(self, 'ledger', None)
 
         def flush():
             nonlocal pending, pending_samples
@@ -1435,17 +1516,34 @@ class App():
             n_parts = len(pending)
             pending = []
             pending_samples = 0
+            entry = None
+            entry_start = range_start
+            if ledger:
+                covered = ledger.entries[-1]['end'] if ledger.entries else 0
+                if entry_start > covered:
+                    ledger.outcome(covered, entry_start, error='queue_gap')
+                elif entry_start < covered:
+                    ledger.incident('queue_overlap', start=entry_start, covered=covered)
+                    merged = merged[covered-entry_start:]
+                    entry_start = covered
+                    if not len(merged):
+                        return
             try:
                 t0 = time.time()
                 text = self.transcription_worker.transcribe_chunk(merged)
+                if ledger:
+                    entry = ledger.outcome(entry_start, entry_start + len(merged), text,
+                                           getattr(self.transcription_worker, 'last_raw', text))
                 elapsed = time.time() - t0
                 audio_dur = len(merged) / StreamingRecorder.SAMPLE_RATE
                 print('[transcribe] %.1fs audio (%d part%s) -> %.1fs processing: "%s"'
                       % (audio_dur, n_parts, '' if n_parts == 1 else 's', elapsed, text.strip()))
                 if text.strip():
-                    self.typing_queue.put(text)
+                    self.typing_queue.put((text, entry) if ledger else text)
             except Exception as e:
                 print('[transcribe] Error: %s' % e)
+                if ledger and entry is None:
+                    ledger.outcome(entry_start, entry_start + len(merged), error=str(e))
 
         while True:
             item = self.transcription_queue.get()
@@ -1455,7 +1553,11 @@ class App():
                 self.typing_queue.put(None)
                 break
 
-            chunk, is_boundary = item
+            chunk, is_boundary = item[:2]
+            if pending and len(item) > 2 and item[2] != range_start + pending_samples:
+                flush()  # Never hide an internal queue gap inside one merged range.
+            if not pending:
+                range_start = item[2] if len(item) > 2 else 0
             pending.append(chunk)
             pending_samples += len(chunk)
 
@@ -1469,10 +1571,24 @@ class App():
             text = self.typing_queue.get()
             if text is None:
                 # Sentinel: end of stream (beep already played in stop())
+                ledger = getattr(self, 'ledger', None)
+                if ledger:
+                    try:
+                        ledger.finish(
+                            lambda audio: self.transcription_worker.transcribe_chunk(audio, recovery=True),
+                            self.replayer._set_clipboard)
+                    except Exception as exc:
+                        ledger.incident('stop_check_failed', error=str(exc))
+                    finally:
+                        ledger.frames.clear()
+                        self.recorder._raw_frames.clear()
                 self.active = False
                 print('Session ended.')
                 break
 
+            entry = None
+            if isinstance(text, tuple):
+                text, entry = text
             # Strip leading space from first chunk only
             if first_chunk:
                 if text.startswith(' '):
@@ -1483,7 +1599,12 @@ class App():
                 if text and text[0] not in ' .,;:!?\'")-]}>':
                     text = ' ' + text
 
-            self.replayer.type_text(text)
+            try:
+                result = self.replayer.type_text(text)
+            except Exception as exc:
+                result = dict(ok=False, path='exception', error=str(exc))
+            if entry is not None:
+                self.ledger.delivered(entry, result)
 
     def run(self):
         def normalize_key_names(keyseqs, parse=False):

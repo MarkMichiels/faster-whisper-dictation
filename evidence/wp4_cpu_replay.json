@@ -1,0 +1,18 @@
+{
+  "model": "large-v3",
+  "device": "cpu",
+  "compute_type": "int8",
+  "threads": 6,
+  "audio_seconds": 60.0009375,
+  "ranges": 7,
+  "injected_decoder_errors": 1,
+  "ordinary_seconds": 22.12962303200038,
+  "stop_check_extra_seconds": 4.558846449013799,
+  "originals": 5,
+  "correction_items": 1,
+  "recovered_first_range_words": 38,
+  "checked_ranges": 1,
+  "ram_audio_released": true,
+  "gpu_seconds": null,
+  "desktop_writes": false
+}

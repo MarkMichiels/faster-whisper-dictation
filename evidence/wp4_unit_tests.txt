@@ -1,0 +1,179 @@
+test_copyq_and_xclip_returncodes (test_coverage.CoverageTests.test_copyq_and_xclip_returncodes) ... DCT-COVERAGE {"timestamp": "2026-10-17T19:01:53.145781+02:00", "kind": "copyq_failure", "ok": false, "path": "none", "copyq_add": 1, "copyq_copy": null, "xclip": null, "copyq_error": "copyq add rc=1"}
+DCT-COVERAGE {"timestamp": "2026-10-17T19:01:53.145824+02:00", "kind": "clipboard_fallback", "ok": true, "path": "xclip", "copyq_add": 1, "copyq_copy": null, "xclip": 0, "copyq_error": "copyq add rc=1"}
+DCT-COVERAGE {"timestamp": "2026-10-17T19:01:53.145858+02:00", "kind": "copyq_failure", "ok": false, "path": "none", "copyq_add": 0, "copyq_copy": 2, "xclip": null, "copyq_error": "copyq copy rc=2"}
+DCT-COVERAGE {"timestamp": "2026-10-17T19:01:53.145868+02:00", "kind": "clipboard_fallback", "ok": false, "path": "xclip", "copyq_add": 0, "copyq_copy": 2, "xclip": 7, "copyq_error": "copyq copy rc=2"}
+ok
+test_duration_limit_never_overwrites_head (test_coverage.CoverageTests.test_duration_limit_never_overwrites_head) ... DCT-COVERAGE {"timestamp": "2026-10-17T19:01:53.145929+02:00", "kind": "duration_warning", "remaining_seconds": 60}
+ok
+test_error_artifact_and_copyq_failure_all_checked (test_coverage.CoverageTests.test_error_artifact_and_copyq_failure_all_checked) ... DCT-COVERAGE {"timestamp": "2026-10-17T19:01:53.146337+02:00", "kind": "outcome", "start": 0, "end": 160000, "start_s": 0.0, "end_s": 10.0, "outcome": "decoder_error", "text": "", "raw": "", "error": "CUDA OOM", "discard_reason": null, "decoded_at": 1792256513.146335, "delivery": {"path": "none", "ok": false, "reason": "decoder_error"}, "recovery": null}
+DCT-COVERAGE {"timestamp": "2026-10-17T19:01:53.146364+02:00", "kind": "decoder_error", "start": 0, "end": 160000, "error": "CUDA OOM"}
+DCT-COVERAGE {"timestamp": "2026-10-17T19:01:53.146374+02:00", "kind": "outcome", "start": 160000, "end": 320000, "start_s": 10.0, "end_s": 20.0, "outcome": "artifact", "text": "", "raw": "Dank u wel.", "error": null, "discard_reason": "known_silence_artifact", "decoded_at": 1792256513.1463728, "delivery": {"path": "none", "ok": false, "reason": "artifact"}, "recovery": null}
+DCT-COVERAGE {"timestamp": "2026-10-17T19:01:53.146383+02:00", "kind": "suspect_decode", "start": 160000, "end": 320000, "outcome": "artifact"}
+DCT-COVERAGE {"timestamp": "2026-10-17T19:01:53.146391+02:00", "kind": "outcome", "start": 320000, "end": 480000, "start_s": 20.0, "end_s": 30.0, "outcome": "text", "text": "afgeleverd via fallback", "raw": "", "error": null, "discard_reason": null, "decoded_at": 1792256513.14639, "delivery": null, "recovery": null}
+DCT-COVERAGE {"timestamp": "2026-10-17T19:01:53.146400+02:00", "kind": "suspect_decode", "start": 320000, "end": 480000, "outcome": "text"}
+DCT-COVERAGE {"timestamp": "2026-10-17T19:01:53.146407+02:00", "kind": "delivery", "start": 320000, "end": 480000, "ok": true, "path": "xclip", "copyq_add": 1, "at": 1792256513.146406}
+DCT-COVERAGE {"timestamp": "2026-10-17T19:01:53.146414+02:00", "kind": "delivery_degraded", "start": 320000, "result": {"ok": true, "path": "xclip", "copyq_add": 1}}
+DCT-COVERAGE {"timestamp": "2026-10-17T19:01:53.146427+02:00", "kind": "stop_check", "start": 0, "end": 160000, "reason": "decoder_error"}
+DCT-COVERAGE {"timestamp": "2026-10-17T19:01:53.346897+02:00", "kind": "recovery_outcome", "start": 0, "end": 160000, "text": "teruggevonden woorden", "at": 1792256513.34689}
+DCT-COVERAGE {"timestamp": "2026-10-17T19:01:53.346987+02:00", "kind": "stop_check", "start": 160000, "end": 320000, "reason": "artifact"}
+DCT-COVERAGE {"timestamp": "2026-10-17T19:01:53.347219+02:00", "kind": "recovery_outcome", "start": 160000, "end": 320000, "text": "teruggevonden woorden", "at": 1792256513.3472164}
+DCT-COVERAGE {"timestamp": "2026-10-17T19:01:53.347257+02:00", "kind": "stop_check", "start": 320000, "end": 480000, "reason": "text"}
+DCT-COVERAGE {"timestamp": "2026-10-17T19:01:53.347278+02:00", "kind": "recovery_outcome", "start": 320000, "end": 480000, "text": "afgeleverd via fallback", "at": 1792256513.3472779}
+DCT-COVERAGE {"timestamp": "2026-10-17T19:01:53.347295+02:00", "kind": "correction_delivery", "start": 0, "end": 160000, "ok": true, "path": "copyq", "at": 1792256513.3472936, "paste": "never_sent"}
+DCT-COVERAGE {"timestamp": "2026-10-17T19:01:53.347321+02:00", "kind": "correction_delivery", "start": 160000, "end": 320000, "ok": true, "path": "copyq", "at": 1792256513.3473198, "paste": "never_sent"}
+DCT-COVERAGE {"timestamp": "2026-10-17T19:01:53.347332+02:00", "kind": "correction_delivery", "start": 320000, "end": 480000, "ok": true, "path": "copyq", "at": 1792256513.3473318, "paste": "never_sent"}
+DCT-COVERAGE {"timestamp": "2026-10-17T19:01:53.347350+02:00", "kind": "corrections_clipboard", "count": 3}
+DCT-COVERAGE {"timestamp": "2026-10-17T19:01:53.347371+02:00", "kind": "stop_summary", "samples": 480000, "ranges": 3, "suspects": 3, "corrections": 3, "unresolved_ranges": 0, "original_delivery_failures": 0, "correction_delivery_failures": 0, "check_seconds": 0.20094497900572605, "note": "clipboard/paste command success is not target application acknowledgement"}
+DCT-COVERAGE {"timestamp": "2026-10-17T19:01:53.347387+02:00", "kind": "audio_released", "samples": 480000}
+ok
+test_focus_or_paste_failure_returns_failed_delivery (test_coverage.CoverageTests.test_focus_or_paste_failure_returns_failed_delivery) ... ok
+test_internal_queue_gap_not_hidden_by_merging_or_decoder_error (test_coverage.CoverageTests.test_internal_queue_gap_not_hidden_by_merging_or_decoder_error) ... woorden
+woorden
+DCT-COVERAGE {"timestamp": "2026-10-17T19:01:53.366552+02:00", "kind": "outcome", "start": 0, "end": 16000, "start_s": 0.0, "end_s": 1.0, "outcome": "text", "text": "Eerste woorden.", "raw": "Eerste woorden.", "error": null, "discard_reason": null, "decoded_at": 1792256513.36655, "delivery": null, "recovery": null}
+[transcribe] 1.0s audio (1 part) -> 0.0s processing: "Eerste woorden."
+DCT-COVERAGE {"timestamp": "2026-10-17T19:01:53.366600+02:00", "kind": "outcome", "start": 16000, "end": 32000, "start_s": 1.0, "end_s": 2.0, "outcome": "decoder_error", "text": "", "raw": "", "error": "queue_gap", "discard_reason": null, "decoded_at": 1792256513.3665988, "delivery": {"path": "none", "ok": false, "reason": "decoder_error"}, "recovery": null}
+DCT-COVERAGE {"timestamp": "2026-10-17T19:01:53.366616+02:00", "kind": "decoder_error", "start": 16000, "end": 32000, "error": "queue_gap"}
+[transcribe] Error: OOM
+DCT-COVERAGE {"timestamp": "2026-10-17T19:01:53.366634+02:00", "kind": "outcome", "start": 32000, "end": 48000, "start_s": 2.0, "end_s": 3.0, "outcome": "decoder_error", "text": "", "raw": "", "error": "OOM", "discard_reason": null, "decoded_at": 1792256513.3666337, "delivery": {"path": "none", "ok": false, "reason": "decoder_error"}, "recovery": null}
+DCT-COVERAGE {"timestamp": "2026-10-17T19:01:53.366643+02:00", "kind": "decoder_error", "start": 32000, "end": 48000, "error": "OOM"}
+ok
+test_partition_and_gap_recovery (test_coverage.CoverageTests.test_partition_and_gap_recovery) ... DCT-COVERAGE {"timestamp": "2026-10-17T19:01:53.366697+02:00", "kind": "outcome", "start": 0, "end": 1, "start_s": 0.0, "end_s": 6.25e-05, "outcome": "text", "text": "tekst", "raw": "", "error": null, "discard_reason": null, "decoded_at": 1792256513.366696, "delivery": null, "recovery": null}
+DCT-COVERAGE {"timestamp": "2026-10-17T19:01:53.366709+02:00", "kind": "delivery", "start": 0, "end": 1, "ok": true, "path": "copyq", "at": 1792256513.3667085}
+DCT-COVERAGE {"timestamp": "2026-10-17T19:01:53.366718+02:00", "kind": "outcome", "start": 1, "end": 1024, "start_s": 6.25e-05, "end_s": 0.064, "outcome": "text", "text": "tekst", "raw": "", "error": null, "discard_reason": null, "decoded_at": 1792256513.366718, "delivery": null, "recovery": null}
+DCT-COVERAGE {"timestamp": "2026-10-17T19:01:53.366727+02:00", "kind": "delivery", "start": 1, "end": 1024, "ok": true, "path": "copyq", "at": 1792256513.366727}
+DCT-COVERAGE {"timestamp": "2026-10-17T19:01:53.366735+02:00", "kind": "outcome", "start": 1024, "end": 2024, "start_s": 0.064, "end_s": 0.1265, "outcome": "text", "text": "tekst", "raw": "", "error": null, "discard_reason": null, "decoded_at": 1792256513.3667345, "delivery": null, "recovery": null}
+DCT-COVERAGE {"timestamp": "2026-10-17T19:01:53.366749+02:00", "kind": "delivery", "start": 1024, "end": 2024, "ok": true, "path": "copyq", "at": 1792256513.3667486}
+DCT-COVERAGE {"timestamp": "2026-10-17T19:01:53.366755+02:00", "kind": "outcome", "start": 2024, "end": 18024, "start_s": 0.1265, "end_s": 1.1265, "outcome": "text", "text": "tekst", "raw": "", "error": null, "discard_reason": null, "decoded_at": 1792256513.366755, "delivery": null, "recovery": null}
+DCT-COVERAGE {"timestamp": "2026-10-17T19:01:53.366762+02:00", "kind": "delivery", "start": 2024, "end": 18024, "ok": true, "path": "copyq", "at": 1792256513.3667624}
+DCT-COVERAGE {"timestamp": "2026-10-17T19:01:53.366790+02:00", "kind": "outcome", "start": 18024, "end": 32000, "start_s": 1.1265, "end_s": 2.0, "outcome": "decoder_error", "text": "", "raw": "", "error": "queue_gap", "discard_reason": null, "decoded_at": 1792256513.3667898, "delivery": {"path": "none", "ok": false, "reason": "decoder_error"}, "recovery": null}
+DCT-COVERAGE {"timestamp": "2026-10-17T19:01:53.366799+02:00", "kind": "decoder_error", "start": 18024, "end": 32000, "error": "queue_gap"}
+DCT-COVERAGE {"timestamp": "2026-10-17T19:01:53.366808+02:00", "kind": "stop_check", "start": 18024, "end": 32000, "reason": "decoder_error"}
+DCT-COVERAGE {"timestamp": "2026-10-17T19:01:53.566968+02:00", "kind": "recovery_outcome", "start": 18024, "end": 32000, "text": "hersteld", "at": 1792256513.5669618}
+DCT-COVERAGE {"timestamp": "2026-10-17T19:01:53.567056+02:00", "kind": "correction_delivery", "start": 18024, "end": 32000, "ok": true, "path": "copyq", "at": 1792256513.567054, "paste": "never_sent"}
+DCT-COVERAGE {"timestamp": "2026-10-17T19:01:53.567074+02:00", "kind": "corrections_clipboard", "count": 1}
+DCT-COVERAGE {"timestamp": "2026-10-17T19:01:53.567095+02:00", "kind": "stop_summary", "samples": 32000, "ranges": 5, "suspects": 1, "corrections": 1, "unresolved_ranges": 0, "original_delivery_failures": 0, "correction_delivery_failures": 0, "check_seconds": 0.2003063640149776, "note": "clipboard/paste command success is not target application acknowledgement"}
+DCT-COVERAGE {"timestamp": "2026-10-17T19:01:53.567111+02:00", "kind": "audio_released", "samples": 32000}
+ok
+test_pipeline_originals_then_separate_correction (test_coverage.CoverageTests.test_pipeline_originals_then_separate_correction) ... [transcribe] Error: OOM
+DCT-COVERAGE {"timestamp": "2026-10-17T19:01:53.574591+02:00", "kind": "outcome", "start": 0, "end": 160000, "start_s": 0.0, "end_s": 10.0, "outcome": "decoder_error", "text": "", "raw": "", "error": "OOM", "discard_reason": null, "decoded_at": 1792256513.5745883, "delivery": {"path": "none", "ok": false, "reason": "decoder_error"}, "recovery": null}
+DCT-COVERAGE {"timestamp": "2026-10-17T19:01:53.574640+02:00", "kind": "decoder_error", "start": 0, "end": 160000, "error": "OOM"}
+DCT-COVERAGE {"timestamp": "2026-10-17T19:01:53.574766+02:00", "kind": "outcome", "start": 160000, "end": 320000, "start_s": 10.0, "end_s": 20.0, "outcome": "text", "text": "Dit zijn de normale reeds afgeleverde woorden.", "raw": "Dit zijn de normale reeds afgeleverde woorden.", "error": null, "discard_reason": null, "decoded_at": 1792256513.574765, "delivery": null, "recovery": null}
+[transcribe] 10.0s audio (1 part) -> 0.0s processing: "Dit zijn de normale reeds afgeleverde woorden."
+DCT-COVERAGE {"timestamp": "2026-10-17T19:01:53.574793+02:00", "kind": "delivery", "start": 160000, "end": 320000, "ok": true, "path": "copyq", "at": 1792256513.5747924}
+DCT-COVERAGE {"timestamp": "2026-10-17T19:01:53.574807+02:00", "kind": "stop_check", "start": 0, "end": 160000, "reason": "decoder_error"}
+DCT-COVERAGE {"timestamp": "2026-10-17T19:01:53.775400+02:00", "kind": "recovery_outcome", "start": 0, "end": 160000, "text": "Dit zijn teruggevonden woorden uit het eerste stuk.", "at": 1792256513.7753954}
+DCT-COVERAGE {"timestamp": "2026-10-17T19:01:53.775489+02:00", "kind": "correction_delivery", "start": 0, "end": 160000, "ok": true, "path": "copyq", "at": 1792256513.7754865, "paste": "never_sent"}
+DCT-COVERAGE {"timestamp": "2026-10-17T19:01:53.775520+02:00", "kind": "corrections_clipboard", "count": 1}
+DCT-COVERAGE {"timestamp": "2026-10-17T19:01:53.775540+02:00", "kind": "stop_summary", "samples": 320000, "ranges": 2, "suspects": 1, "corrections": 1, "unresolved_ranges": 0, "original_delivery_failures": 0, "correction_delivery_failures": 0, "check_seconds": 0.20073476299876347, "note": "clipboard/paste command success is not target application acknowledgement"}
+DCT-COVERAGE {"timestamp": "2026-10-17T19:01:53.775556+02:00", "kind": "audio_released", "samples": 320000}
+ok
+test_recorder_absolute_ranges_survive_trim_and_stop (test_coverage.CoverageTests.test_recorder_absolute_ranges_survive_trim_and_stop) ... Session ended.
+[VAD] Speech chunk: 0.5s (samples 0-8000)
+Done recording.
+[flush] Sending remaining 0.5s audio
+DCT-COVERAGE {"timestamp": "2026-10-17T19:01:53.775798+02:00", "kind": "outcome", "start": 0, "end": 8000, "start_s": 0.0, "end_s": 0.5, "outcome": "text", "text": "woorden", "raw": "", "error": null, "discard_reason": null, "decoded_at": 1792256513.7757947, "delivery": null, "recovery": null}
+DCT-COVERAGE {"timestamp": "2026-10-17T19:01:53.775840+02:00", "kind": "outcome", "start": 8000, "end": 16384, "start_s": 0.5, "end_s": 1.024, "outcome": "text", "text": "woorden", "raw": "", "error": null, "discard_reason": null, "decoded_at": 1792256513.7758384, "delivery": null, "recovery": null}
+ok
+test_recovery_retains_literal_filtered_words_without_prompt (test_coverage.CoverageTests.test_recovery_retains_literal_filtered_words_without_prompt) ... ok
+test_release_even_when_recovery_or_delivery_raises (test_coverage.CoverageTests.test_release_even_when_recovery_or_delivery_raises) ... DCT-COVERAGE {"timestamp": "2026-10-17T19:01:53.775979+02:00", "kind": "outcome", "start": 0, "end": 16000, "start_s": 0.0, "end_s": 1.0, "outcome": "decoder_error", "text": "", "raw": "", "error": "OOM", "discard_reason": null, "decoded_at": 1792256513.775977, "delivery": {"path": "none", "ok": false, "reason": "decoder_error"}, "recovery": null}
+DCT-COVERAGE {"timestamp": "2026-10-17T19:01:53.776004+02:00", "kind": "decoder_error", "start": 0, "end": 16000, "error": "OOM"}
+DCT-COVERAGE {"timestamp": "2026-10-17T19:01:53.776018+02:00", "kind": "stop_check", "start": 0, "end": 16000, "reason": "decoder_error"}
+DCT-COVERAGE {"timestamp": "2026-10-17T19:01:53.976176+02:00", "kind": "recovery_failed", "start": 0, "error": "failed"}
+DCT-COVERAGE {"timestamp": "2026-10-17T19:01:53.976275+02:00", "kind": "stop_summary", "samples": 16000, "ranges": 1, "suspects": 1, "corrections": 0, "unresolved_ranges": 1, "original_delivery_failures": 0, "correction_delivery_failures": 0, "check_seconds": 0.20025731300120242, "note": "clipboard/paste command success is not target application acknowledgement"}
+DCT-COVERAGE {"timestamp": "2026-10-17T19:01:53.976316+02:00", "kind": "audio_released", "samples": 16000}
+DCT-COVERAGE {"timestamp": "2026-10-17T19:01:53.976390+02:00", "kind": "outcome", "start": 0, "end": 16000, "start_s": 0.0, "end_s": 1.0, "outcome": "decoder_error", "text": "", "raw": "", "error": "OOM", "discard_reason": null, "decoded_at": 1792256513.9763868, "delivery": {"path": "none", "ok": false, "reason": "decoder_error"}, "recovery": null}
+DCT-COVERAGE {"timestamp": "2026-10-17T19:01:53.976430+02:00", "kind": "decoder_error", "start": 0, "end": 16000, "error": "OOM"}
+DCT-COVERAGE {"timestamp": "2026-10-17T19:01:53.976453+02:00", "kind": "stop_check", "start": 0, "end": 16000, "reason": "decoder_error"}
+DCT-COVERAGE {"timestamp": "2026-10-17T19:01:54.178762+02:00", "kind": "recovery_outcome", "start": 0, "end": 16000, "text": "woorden", "at": 1792256514.178754}
+DCT-COVERAGE {"timestamp": "2026-10-17T19:01:54.178862+02:00", "kind": "correction_delivery", "start": 0, "end": 16000, "ok": false, "path": "exception", "error": "failed", "at": 1792256514.1788597, "paste": "never_sent"}
+DCT-COVERAGE {"timestamp": "2026-10-17T19:01:54.178890+02:00", "kind": "corrections_delivery_failed", "count": 1}
+DCT-COVERAGE {"timestamp": "2026-10-17T19:01:54.178921+02:00", "kind": "stop_summary", "samples": 16000, "ranges": 1, "suspects": 1, "corrections": 1, "unresolved_ranges": 0, "original_delivery_failures": 0, "correction_delivery_failures": 1, "check_seconds": 0.2024737460014876, "note": "clipboard/paste command success is not target application acknowledgement"}
+DCT-COVERAGE {"timestamp": "2026-10-17T19:01:54.178938+02:00", "kind": "audio_released", "samples": 16000}
+ok
+test_slow_consumer_drains_to_sentinel_without_queue_loss (test_recovery.AudioCoverageTests.test_slow_consumer_drains_to_sentinel_without_queue_loss) ... ok
+test_sub_100ms_tail_and_double_stop (test_recovery.AudioCoverageTests.test_sub_100ms_tail_and_double_stop) ... ok
+test_vad_gaps_and_stop_tail_cover_every_sample (test_recovery.AudioCoverageTests.test_vad_gaps_and_stop_tail_cover_every_sample) ... ok
+test_context_hygiene (test_recovery.RecoveryTests.test_context_hygiene) ... ok
+test_normal_no_retry_and_filter_regressions (test_recovery.RecoveryTests.test_normal_no_retry_and_filter_regressions) ... ok
+test_one_retry_recovers_and_breaks_loop (test_recovery.RecoveryTests.test_one_retry_recovers_and_breaks_loop) ... ok
+test_prompt_scrubbed_before_decode (test_recovery.RecoveryTests.test_prompt_scrubbed_before_decode) ... ok
+test_retry_cannot_erase_first_pass_words (test_recovery.RecoveryTests.test_retry_cannot_erase_first_pass_words) ... ok
+test_short_for_audio_retried_once (test_recovery.RecoveryTests.test_short_for_audio_retried_once) ... ok
+test_silence_stays_filtered (test_recovery.RecoveryTests.test_silence_stays_filtered) ... ok
+
+----------------------------------------------------------------------
+Ran 20 tests in 1.057s
+
+OK
+[transcribe] 0.0s audio (1 part) -> 0.0s processing: "chunk 0"
+[transcribe] 0.0s audio (1 part) -> 0.0s processing: "chunk 1"
+[transcribe] 0.0s audio (1 part) -> 0.0s processing: "chunk 2"
+[transcribe] 0.0s audio (1 part) -> 0.0s processing: "chunk 3"
+[transcribe] 0.0s audio (1 part) -> 0.0s processing: "chunk 4"
+[transcribe] 0.0s audio (1 part) -> 0.0s processing: "chunk 5"
+[transcribe] 0.0s audio (1 part) -> 0.0s processing: "chunk 6"
+[transcribe] 0.0s audio (1 part) -> 0.0s processing: "chunk 7"
+[transcribe] 0.0s audio (1 part) -> 0.0s processing: "chunk 8"
+[transcribe] 0.0s audio (1 part) -> 0.0s processing: "chunk 9"
+[transcribe] 0.0s audio (1 part) -> 0.0s processing: "chunk 10"
+[transcribe] 0.0s audio (1 part) -> 0.0s processing: "chunk 11"
+[transcribe] 0.0s audio (1 part) -> 0.0s processing: "chunk 12"
+[transcribe] 0.0s audio (1 part) -> 0.0s processing: "chunk 13"
+[transcribe] 0.0s audio (1 part) -> 0.0s processing: "chunk 14"
+[transcribe] 0.0s audio (1 part) -> 0.0s processing: "chunk 15"
+[transcribe] 0.0s audio (1 part) -> 0.0s processing: "chunk 16"
+[transcribe] 0.0s audio (1 part) -> 0.0s processing: "chunk 17"
+[transcribe] 0.0s audio (1 part) -> 0.0s processing: "chunk 18"
+[transcribe] 0.0s audio (1 part) -> 0.0s processing: "chunk 19"
+[transcribe] 0.0s audio (1 part) -> 0.0s processing: "chunk 20"
+[transcribe] 0.0s audio (1 part) -> 0.0s processing: "chunk 21"
+[transcribe] 0.0s audio (1 part) -> 0.0s processing: "chunk 22"
+[transcribe] 0.0s audio (1 part) -> 0.0s processing: "chunk 23"
+[transcribe] 0.0s audio (1 part) -> 0.0s processing: "chunk 24"
+[transcribe] 0.0s audio (1 part) -> 0.0s processing: "chunk 25"
+[transcribe] 0.0s audio (1 part) -> 0.0s processing: "chunk 26"
+[transcribe] 0.0s audio (1 part) -> 0.0s processing: "chunk 27"
+[transcribe] 0.0s audio (1 part) -> 0.0s processing: "chunk 28"
+[transcribe] 0.0s audio (1 part) -> 0.0s processing: "chunk 29"
+[transcribe] 0.0s audio (1 part) -> 0.0s processing: "chunk 30"
+[transcribe] 0.0s audio (1 part) -> 0.0s processing: "chunk 31"
+[transcribe] 0.0s audio (1 part) -> 0.0s processing: "chunk 32"
+[transcribe] 0.0s audio (1 part) -> 0.0s processing: "chunk 33"
+[transcribe] 0.0s audio (1 part) -> 0.0s processing: "chunk 34"
+[transcribe] 0.0s audio (1 part) -> 0.0s processing: "chunk 35"
+[transcribe] 0.0s audio (1 part) -> 0.0s processing: "chunk 36"
+[transcribe] 0.0s audio (1 part) -> 0.0s processing: "chunk 37"
+[transcribe] 0.0s audio (1 part) -> 0.0s processing: "chunk 38"
+[transcribe] 0.0s audio (1 part) -> 0.0s processing: "chunk 39"
+Done recording.
+[flush] Sending remaining 0.1s audio
+[VAD] Speech chunk: 0.5s (samples 0-8000)
+Done recording.
+[flush] Sending remaining 0.5s audio
+[filter] Rewrote pause run: 'Een *** pauze...' -> 'Een * * * pauze. . .'
+[recovery] Suspect decode (10.0s audio); retry once without prompt
+[recovery] Suspect decode (10.0s audio); retry once without prompt
+[recovery] Suspect decode (10.0s audio); retry once without prompt
+[recovery] Suspect decode (10.0s audio); retry once without prompt
+[recovery] Suspect decode (10.0s audio); retry once without prompt
+[recovery] Suspect decode (10.0s audio); retry once without prompt
+[recovery] Unresolved suspect decode; stop ledger will check
+[recovery] Suspect decode (10.0s audio); retry once without prompt
+[recovery] Unresolved suspect decode; stop ledger will check
+[recovery] Suspect decode (10.0s audio); retry once without prompt
+[recovery] Retry failed; retaining first decode: model failure
+[recovery] Unresolved suspect decode; stop ledger will check
+[recovery] Suspect decode (20.0s audio); retry once without prompt
+[recovery] Unresolved suspect decode; stop ledger will check
+[recovery] Suspect decode (1.0s audio); retry once without prompt
+[recovery] Unresolved suspect decode; stop ledger will check
+[filter] Dropped silence artefact: '***'
+[recovery] Suspect decode (1.0s audio); retry once without prompt
+[recovery] Unresolved suspect decode; stop ledger will check
+[filter] Dropped silence artefact: '. . . .'
+[recovery] Suspect decode (1.0s audio); retry once without prompt
+[recovery] Unresolved suspect decode; stop ledger will check
+[filter] Dropped silence artefact: 'TV Gelderland 2021'
+[recovery] Suspect decode (1.0s audio); retry once without prompt
+[recovery] Unresolved suspect decode; stop ledger will check
+[filter] Dropped silence artefact: 'Dank u wel.'
