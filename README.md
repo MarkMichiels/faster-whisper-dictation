@@ -540,6 +540,37 @@ Every transcription is logged to the systemd journal (the service runs with
 journalctl --user -u spraakherkenning -t python3 | grep '\[transcribe\]'
 ```
 
+## Streaming recovery and offline tests
+
+Rolling prompts exclude pause runs, known subtitle artefacts and repetition loops.
+A suspect decode (empty/artefact, pause/repetition run, or fewer than half a word
+per second on at least eight seconds of audio) is retried **once** without a
+prompt. The old context is cleared. An unresolved result is logged; this is not
+a guarantee of complete recognition. Existing output filtering still applies.
+Retries increase latency, including on real silence. No audio archive is created.
+
+VAD schedules chunks but no longer removes captured samples between detected
+segments. Stop flushes even tails shorter than 100 ms, waits for the recorder
+and VAD writer before its sentinel, and is idempotent. A stuck audio backend can
+therefore delay stop rather than silently dropping an unfinished tail.
+
+Run pure logic/queue/sample-coverage tests without a microphone, model or desktop:
+
+```bash
+venv/bin/python -m unittest discover -s tests -v
+```
+
+Optional CPU/int8 replay against the historical baseline, with an already cached
+large-v3 model and your own 16 kHz audio file (no download or service action):
+
+```bash
+venv/bin/python tests/replay_recovery.py /tmp/speech.wav
+```
+
+The replay reports word counts and context contamination, not transcript contents.
+Automatic silence stop, device overflows, model errors and clipboard delivery
+remain separate failure modes; recovery does not make them lossless.
+
 ## Replace macOS default dictation trigger key
 You can use this app to replace macOS built-in dictation. i.e. Double tap Right Cmd key to begin recording and stop recording with a single tap
 

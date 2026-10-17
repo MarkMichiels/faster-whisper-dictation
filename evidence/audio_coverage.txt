@@ -1,0 +1,13 @@
+[VAD] Speech chunk: 0.2s (samples 4000-8000)
+Done recording.
+[flush] Sending remaining 0.5s audio
+old captured=16384 delivered=12384 missing=4000
+Done recording.
+old tail captured=1000 delivered=0
+[VAD] Speech chunk: 0.5s (samples 0-8000)
+Done recording.
+[flush] Sending remaining 0.5s audio
+new captured=16384 delivered=16384 missing=0
+Done recording.
+[flush] Sending remaining 0.1s audio
+new tail captured=1000 delivered=1000

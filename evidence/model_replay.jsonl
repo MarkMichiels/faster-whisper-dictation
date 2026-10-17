@@ -1,0 +1,4 @@
+{"version": "old", "step": 0, "empty": true, "recovery_attempts": 0, "words": 0, "pause_in_context": true, "elapsed": 3.73}
+{"version": "old", "step": 1, "empty": true, "recovery_attempts": 0, "words": 0, "pause_in_context": true, "elapsed": 2.17}
+{"version": "new", "step": 0, "empty": false, "recovery_attempts": 0, "words": 21, "pause_in_context": false, "elapsed": 3.53}
+{"version": "new", "step": 1, "empty": false, "recovery_attempts": 1, "words": 21, "pause_in_context": false, "elapsed": 7.11}

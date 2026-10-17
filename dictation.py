@@ -108,6 +108,27 @@ def format_ellipsis(text, style='space'):
     return _ELLIPSIS_RE.sub(replacement, text)
 
 
+# Never teach the next decode a pause, subtitle artefact or repetition loop.
+_PAUSE_RUN_RE = re.compile(r'(?:\.\s*){3,}|\u2026+|(?:[*_~#=\-]\s*){3,}')
+_REPEAT_RE = re.compile(r'\b(.{2,80}?)(?:\s+\1){3,}(?=\W|$)', re.IGNORECASE)
+
+
+def prompt_text(text):
+    """Context is a hint, not an output archive. Omit suspect material."""
+    if is_hallucination(text) or _REPEAT_RE.search(text):
+        return ''
+    return re.sub(r'\s+', ' ', _PAUSE_RUN_RE.sub(' ', text)).strip()
+
+
+def suspect_decode(text, duration):
+    """Bounded recovery trigger, not proof that speech was lost."""
+    if not text.strip() or is_hallucination(text):
+        return True
+    if _PAUSE_RUN_RE.search(text) or _REPEAT_RE.search(text):
+        return True
+    return duration >= 8 and len(re.findall(r'\w+', text)) < duration / 2
+
+
 def sanitize_transcript(text, drop_phrases=True, space_runs=True, ellipsis_style='space'):
     """Clean one transcribed chunk before it is typed.
 
@@ -271,6 +292,7 @@ class StreamingRecorder:
         self.auto_stop_silence_s = auto_stop_silence_s
         self.on_auto_stop = on_auto_stop
         self.recording = False
+        self._stop_lock = threading.Lock()
 
         # Eager flush: don't wait for a full silence_ms pause during a long
         # turn. Once min_chunk_s of speech has piled up since the last cut,
@@ -317,21 +339,23 @@ class StreamingRecorder:
 
     def stop(self):
         """Stop recording and flush remaining audio."""
-        print('Done recording.')
-        self.recording = False
-        self._rec_thread.join(timeout=3)
-        self._vad_thread.join(timeout=3)
+        with self._stop_lock:
+            if not self.recording:
+                return
+            print('Done recording.')
+            self.recording = False
+            # The VAD writer must finish before the final snapshot/sentinel.
+            # A timed-out join could previously enqueue audio AFTER the sentinel.
+            self._rec_thread.join()
+            self._vad_thread.join()
 
-        # Flush: transcribe any remaining audio that VAD hasn't sent yet
-        remaining = self._get_all_audio_fp32()
-        if remaining is not None and len(remaining) > self._vad_processed_samples:
-            leftover = remaining[self._vad_processed_samples:]
-            if len(leftover) > self.SAMPLE_RATE * 0.1:  # at least 100ms
+            remaining = self._get_all_audio_fp32()
+            if remaining is not None and len(remaining) > self._vad_processed_samples:
+                leftover = remaining[self._vad_processed_samples:]
                 print('[flush] Sending remaining %.1fs audio' % (len(leftover) / self.SAMPLE_RATE))
                 self.transcription_queue.put((leftover, True))
 
-        # Sentinel to signal end of stream
-        self.transcription_queue.put(None)
+            self.transcription_queue.put(None)
 
     def _record_loop(self):
         """PyAudio recording loop — runs in its own thread."""
@@ -413,7 +437,6 @@ class StreamingRecorder:
         silence_samples = int(self.silence_ms * self.SAMPLE_RATE / 1000)
 
         for ts in timestamps:
-            seg_start = ts['start']
             seg_end = ts['end']
 
             # Skip segments we've already sent
@@ -425,9 +448,11 @@ class StreamingRecorder:
                 # This segment has enough trailing silence — it's complete.
                 # Start no earlier than what we already flushed (an eager
                 # flush may have split inside this segment).
-                chunk_start = max(seg_start, self._vad_processed_samples)
+                # VAD decides WHEN to send, never which captured samples to
+                # discard. Quiet speech before seg_start must reach Whisper too.
+                chunk_start = self._vad_processed_samples
                 chunk = audio[chunk_start:seg_end]
-                if len(chunk) > self.SAMPLE_RATE * 0.1:  # at least 100ms
+                if len(chunk):
                     duration = len(chunk) / self.SAMPLE_RATE
                     print('[VAD] Speech chunk: %.1fs (samples %d-%d)' % (duration, chunk_start, seg_end))
                     # Boundary: a full >=silence_ms pause followed this segment,
@@ -568,22 +593,37 @@ class TranscriptionWorker:
 
     def transcribe_chunk(self, audio_fp32):
         """Transcribe a single audio chunk. Returns text string."""
-        prompt = self._context if (self.context_chars and self._context) else None
-        if self.language:
-            segments, info = self.model.transcribe(audio_fp32, beam_size=5, language=self.language,
-                                                   initial_prompt=prompt,
-                                                   vad_filter=self.vad_filter)
-        else:
-            segments, info = self.model.transcribe(audio_fp32, beam_size=5, initial_prompt=prompt,
-                                                   vad_filter=self.vad_filter)
-            print("Detected language '%s' with probability %f" % (info.language, info.language_probability))
+        prompt = (prompt_text(self._context) or None) if self.context_chars else None
+        def decode(initial_prompt):
+            options = dict(beam_size=5, initial_prompt=initial_prompt,
+                           vad_filter=self.vad_filter)
+            if self.language:
+                options['language'] = self.language
+            segments, info = self.model.transcribe(audio_fp32, **options)
+            return ''.join(segment.text for segment in segments).lstrip()
 
-        text = ''
-        for segment in segments:
-            seg_text = segment.text
-            if text == '' and seg_text.startswith(' '):
-                seg_text = seg_text[1:]
-            text += seg_text
+        duration = len(audio_fp32) / 16000
+        text = decode(prompt)
+        suspect = suspect_decode(text, duration)
+        if suspect:
+            # Reset BEFORE retry: even a failed retry must break the cascade.
+            self.reset_context()
+            print('[recovery] Suspect decode (%.1fs audio); retry once without prompt' % duration)
+            try:
+                retry = decode(None)
+                # Never replace useful first-pass words with a known artefact
+                # or an even shorter suspect result.
+                if (re.search(r'\w', retry) and not is_hallucination(retry)
+                        and (not suspect_decode(retry, duration)
+                             or is_hallucination(text)
+                             or len(re.findall(r'\w+', retry)) >= len(re.findall(r'\w+', text)))):
+                    text = retry
+                elif not re.search(r'\w', text):
+                    text = retry
+            except Exception as exc:
+                print('[recovery] Retry failed; retaining first decode: %s' % exc)
+            if suspect_decode(text, duration):
+                print('[recovery] Unresolved suspect decode; audio not retained')
 
         text = sanitize_transcript(text,
                                    drop_phrases=self.filter_hallucinations,
@@ -592,8 +632,9 @@ class TranscriptionWorker:
 
         # A dropped artefact must not enter the rolling prompt either: feeding
         # 'TV Gelderland 2021' back as context makes the next chunk repeat it.
-        if self.context_chars and text.strip():
-            self._context = (self._context + ' ' + text.strip()).strip()[-self.context_chars:]
+        context = prompt_text(text)
+        if self.context_chars and context and not suspect_decode(text, duration):
+            self._context = (prompt_text(self._context) + ' ' + context).strip()[-self.context_chars:]
 
         return text
 

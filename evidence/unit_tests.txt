@@ -1,0 +1,87 @@
+test_slow_consumer_drains_to_sentinel_without_queue_loss (test_recovery.AudioCoverageTests.test_slow_consumer_drains_to_sentinel_without_queue_loss) ... ok
+test_sub_100ms_tail_and_double_stop (test_recovery.AudioCoverageTests.test_sub_100ms_tail_and_double_stop) ... ok
+test_vad_gaps_and_stop_tail_cover_every_sample (test_recovery.AudioCoverageTests.test_vad_gaps_and_stop_tail_cover_every_sample) ... ok
+test_context_hygiene (test_recovery.RecoveryTests.test_context_hygiene) ... ok
+test_normal_no_retry_and_filter_regressions (test_recovery.RecoveryTests.test_normal_no_retry_and_filter_regressions) ... ok
+test_one_retry_recovers_and_breaks_loop (test_recovery.RecoveryTests.test_one_retry_recovers_and_breaks_loop) ... ok
+test_prompt_scrubbed_before_decode (test_recovery.RecoveryTests.test_prompt_scrubbed_before_decode) ... ok
+test_retry_cannot_erase_first_pass_words (test_recovery.RecoveryTests.test_retry_cannot_erase_first_pass_words) ... ok
+test_short_for_audio_retried_once (test_recovery.RecoveryTests.test_short_for_audio_retried_once) ... ok
+test_silence_stays_filtered (test_recovery.RecoveryTests.test_silence_stays_filtered) ... ok
+
+----------------------------------------------------------------------
+Ran 10 tests in 0.012s
+
+OK
+[transcribe] 0.0s audio (1 part) -> 0.0s processing: "chunk 0"
+[transcribe] 0.0s audio (1 part) -> 0.0s processing: "chunk 1"
+[transcribe] 0.0s audio (1 part) -> 0.0s processing: "chunk 2"
+[transcribe] 0.0s audio (1 part) -> 0.0s processing: "chunk 3"
+[transcribe] 0.0s audio (1 part) -> 0.0s processing: "chunk 4"
+[transcribe] 0.0s audio (1 part) -> 0.0s processing: "chunk 5"
+[transcribe] 0.0s audio (1 part) -> 0.0s processing: "chunk 6"
+[transcribe] 0.0s audio (1 part) -> 0.0s processing: "chunk 7"
+[transcribe] 0.0s audio (1 part) -> 0.0s processing: "chunk 8"
+[transcribe] 0.0s audio (1 part) -> 0.0s processing: "chunk 9"
+[transcribe] 0.0s audio (1 part) -> 0.0s processing: "chunk 10"
+[transcribe] 0.0s audio (1 part) -> 0.0s processing: "chunk 11"
+[transcribe] 0.0s audio (1 part) -> 0.0s processing: "chunk 12"
+[transcribe] 0.0s audio (1 part) -> 0.0s processing: "chunk 13"
+[transcribe] 0.0s audio (1 part) -> 0.0s processing: "chunk 14"
+[transcribe] 0.0s audio (1 part) -> 0.0s processing: "chunk 15"
+[transcribe] 0.0s audio (1 part) -> 0.0s processing: "chunk 16"
+[transcribe] 0.0s audio (1 part) -> 0.0s processing: "chunk 17"
+[transcribe] 0.0s audio (1 part) -> 0.0s processing: "chunk 18"
+[transcribe] 0.0s audio (1 part) -> 0.0s processing: "chunk 19"
+[transcribe] 0.0s audio (1 part) -> 0.0s processing: "chunk 20"
+[transcribe] 0.0s audio (1 part) -> 0.0s processing: "chunk 21"
+[transcribe] 0.0s audio (1 part) -> 0.0s processing: "chunk 22"
+[transcribe] 0.0s audio (1 part) -> 0.0s processing: "chunk 23"
+[transcribe] 0.0s audio (1 part) -> 0.0s processing: "chunk 24"
+[transcribe] 0.0s audio (1 part) -> 0.0s processing: "chunk 25"
+[transcribe] 0.0s audio (1 part) -> 0.0s processing: "chunk 26"
+[transcribe] 0.0s audio (1 part) -> 0.0s processing: "chunk 27"
+[transcribe] 0.0s audio (1 part) -> 0.0s processing: "chunk 28"
+[transcribe] 0.0s audio (1 part) -> 0.0s processing: "chunk 29"
+[transcribe] 0.0s audio (1 part) -> 0.0s processing: "chunk 30"
+[transcribe] 0.0s audio (1 part) -> 0.0s processing: "chunk 31"
+[transcribe] 0.0s audio (1 part) -> 0.0s processing: "chunk 32"
+[transcribe] 0.0s audio (1 part) -> 0.0s processing: "chunk 33"
+[transcribe] 0.0s audio (1 part) -> 0.0s processing: "chunk 34"
+[transcribe] 0.0s audio (1 part) -> 0.0s processing: "chunk 35"
+[transcribe] 0.0s audio (1 part) -> 0.0s processing: "chunk 36"
+[transcribe] 0.0s audio (1 part) -> 0.0s processing: "chunk 37"
+[transcribe] 0.0s audio (1 part) -> 0.0s processing: "chunk 38"
+[transcribe] 0.0s audio (1 part) -> 0.0s processing: "chunk 39"
+Done recording.
+[flush] Sending remaining 0.1s audio
+[VAD] Speech chunk: 0.5s (samples 0-8000)
+Done recording.
+[flush] Sending remaining 0.5s audio
+[filter] Rewrote pause run: 'Een *** pauze...' -> 'Een * * * pauze. . .'
+[recovery] Suspect decode (10.0s audio); retry once without prompt
+[recovery] Suspect decode (10.0s audio); retry once without prompt
+[recovery] Suspect decode (10.0s audio); retry once without prompt
+[recovery] Suspect decode (10.0s audio); retry once without prompt
+[recovery] Suspect decode (10.0s audio); retry once without prompt
+[recovery] Suspect decode (10.0s audio); retry once without prompt
+[recovery] Unresolved suspect decode; audio not retained
+[recovery] Suspect decode (10.0s audio); retry once without prompt
+[recovery] Unresolved suspect decode; audio not retained
+[recovery] Suspect decode (10.0s audio); retry once without prompt
+[recovery] Retry failed; retaining first decode: model failure
+[recovery] Unresolved suspect decode; audio not retained
+[recovery] Suspect decode (20.0s audio); retry once without prompt
+[recovery] Unresolved suspect decode; audio not retained
+[recovery] Suspect decode (1.0s audio); retry once without prompt
+[recovery] Unresolved suspect decode; audio not retained
+[filter] Dropped silence artefact: '***'
+[recovery] Suspect decode (1.0s audio); retry once without prompt
+[recovery] Unresolved suspect decode; audio not retained
+[filter] Dropped silence artefact: '. . . .'
+[recovery] Suspect decode (1.0s audio); retry once without prompt
+[recovery] Unresolved suspect decode; audio not retained
+[filter] Dropped silence artefact: 'TV Gelderland 2021'
+[recovery] Suspect decode (1.0s audio); retry once without prompt
+[recovery] Unresolved suspect decode; audio not retained
+[filter] Dropped silence artefact: 'Dank u wel.'
