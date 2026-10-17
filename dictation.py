@@ -1377,6 +1377,10 @@ class App():
         currently configured language untouched.
         """
         if self.active:
+            # Previous session is still finishing (typing or stop check). Make a
+            # refused start visible: speech after it is not being recorded.
+            diagnostic('start_refused_busy')
+            print('[busy] Start refused: previous session still finishing')
             return None
 
         self.active = True
