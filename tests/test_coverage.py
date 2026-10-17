@@ -183,6 +183,91 @@ class CoverageTests(unittest.TestCase):
         self.assertEqual(calls, [])
         self.assertFalse(hasattr(load_logic()['App'], '_coverage_notice'))
 
+    def test_restart_during_stop_check_is_accepted_and_ordered(self):
+        """Start during A's stop check: B records at once, decodes/pastes after A."""
+        R = coverage.RATE
+        logic = load_logic()
+        release, a_checking = threading.Event(), threading.Event()
+        events, recorders = [], []
+
+        class FakeRecorder:
+            SAMPLE_RATE = R
+            def __init__(self, transcription_queue, ledger=None, **kw):
+                self.queue, self.ledger, self._raw_frames = transcription_queue, ledger, []
+                self.name = 'AB'[len(recorders)]
+                recorders.append(self)
+            def start(self):
+                events.append('record ' + self.name)  # mic open: audio is captured from here
+                self.ledger.capture(np.zeros(2*R, dtype=np.int16).tobytes())
+            def stop(self):
+                value = 0.0 if self.name == 'A' else 1.0
+                for start in (0, R):
+                    self.queue.put((np.full(R, value, dtype=np.float32), True, start))
+                self.queue.put(None)
+
+        class FakeWorker:
+            language = 'nl'
+            def reset_context(self):
+                events.append('reset ' + str(self.language))
+            def transcribe_chunk(self, audio, recovery=False):
+                name = 'A' if audio[0] == 0 else 'B'
+                if recovery:
+                    a_checking.set()
+                    release.wait(5)
+                    return 'teruggevonden woorden'
+                events.append('decode ' + name)
+                if name == 'A' and events.count('decode A') == 1:
+                    raise RuntimeError('OOM')
+                return 'tekst %s' % name
+
+        class FakeReplayer:
+            target_wid = None
+            def __init__(self):
+                self.windows = iter(['win-A', 'win-B'])
+            def window_id(self):
+                return next(self.windows)
+            def type_text(self, text):
+                events.append('paste %s @%s' % (text.strip(), self.target_wid))
+                return dict(ok=True, path='copyq', paste='shortcut_sent_not_acknowledged')
+
+        logic.update(StreamingRecorder=FakeRecorder, CoverageLedger=coverage.CoverageLedger,
+                     diagnostic=coverage.diagnostic, MAX_SECONDS=coverage.MAX_SECONDS, RATE=R)
+        app = logic['App'].__new__(logic['App'])
+        app.args = types.SimpleNamespace(paste_min_s=0, silence_ms=1000, auto_stop_silence=0,
+                                         min_chunk_s=1, max_chunk_s=10, eager_prob=0.5, max_time=60)
+        app.active, app.session, app.timer = False, None, None
+        app.beep = lambda *a, **kw: None
+        app.transcription_worker, app.replayer = FakeWorker(), FakeReplayer()
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            self.assertTrue(app.start('nl'))
+            session_a = app.session
+            self.assertTrue(app.stop())
+            self.assertTrue(a_checking.wait(5))  # A is now in its stop check
+            self.assertTrue(app.start('en'))  # not refused
+            session_b = app.session
+            self.assertTrue(app.stop())
+            self.assertFalse(session_a.done.is_set())
+            self.assertNotIn('decode B', events)  # B waits, its audio is queued
+            release.set()
+            self.assertTrue(session_b.done.wait(5))
+        self.assertIn('"start_while_finishing"', out.getvalue())
+        self.assertNotIn('start_refused_busy', out.getvalue())
+        self.assertLess(events.index('record B'), events.index('paste [Correctie: vóór "tekst A" is '
+                                                              'waarschijnlijk dit gemist: "teruggevonden woorden"] @win-A'))
+        pastes = [e for e in events if e.startswith('paste')]
+        self.assertEqual(pastes, [
+            'paste tekst A @win-A',
+            'paste [Correctie: vóór "tekst A" is waarschijnlijk dit gemist: "teruggevonden woorden"] @win-A',
+            'paste tekst B @win-B', 'paste tekst B @win-B'])
+        # Every captured sample of B was decoded and delivered; nothing lost.
+        ledger_b = session_b.ledger
+        self.assertEqual([(e['start'], e['end'], e['outcome']) for e in ledger_b.entries],
+                         [(0, R, 'text'), (R, 2*R, 'text')])
+        self.assertTrue(all(e['delivery']['ok'] for e in ledger_b.entries))
+        self.assertEqual(app.transcription_worker.language, 'en')
+        self.assertFalse(app.active)
+
     def test_release_even_when_recovery_or_delivery_raises(self):
         for fail_decode in (True, False):
             obj = self.ledger(1)

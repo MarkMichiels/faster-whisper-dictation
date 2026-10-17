@@ -700,14 +700,18 @@ class KeyboardReplayer():
         # Window-ID waar de dictatie begon — paste landt hier ook als focus tussendoor verschuift.
         self.target_wid = None
 
-    def capture_target_window(self):
-        """Save active window at recording-start so paste lands here, even if focus drifts."""
+    def window_id(self):
+        """Active window id, or None."""
         try:
-            self.target_wid = subprocess.check_output(
+            return subprocess.check_output(
                 ['xdotool', 'getactivewindow'], timeout=2
             ).decode().strip()
         except Exception:
-            self.target_wid = None
+            return None
+
+    def capture_target_window(self):
+        """Save active window at recording-start so paste lands here, even if focus drifts."""
+        self.target_wid = self.window_id()
 
     def _restore_target_window(self):
         """Activate the recording-start window before paste (no-op if not captured).
@@ -1334,12 +1338,36 @@ class App():
 
     Sentinel flow: recorder.stop() puts None on transcription_queue
                    -> transcription thread puts None on typing_queue
-                   -> typing thread plays stop beep and sets active=False
+                   -> typing thread runs the stop check and sets session.done
+
+    Sessions: stop() releases `active` as soon as the recorder is flushed, so
+    a new start is never refused. The new session records at once, but its
+    transcription waits for the previous session's done event: decoding,
+    stop-check corrections and pastes stay strictly in session order.
     """
+
+    class Session:
+        """Per-session state, so a new start never shares queues, ledger,
+        recorder or paste target with a previous session still finishing."""
+        PREVIOUS_WAIT_S = 300
+
+        def __init__(self, transcription_queue, typing_queue, ledger=None, recorder=None,
+                     previous=None, language=_UNSET, target_wid=None):
+            self.transcription_queue = transcription_queue
+            self.typing_queue = typing_queue
+            self.ledger = ledger
+            self.recorder = recorder
+            self.previous = previous  # threading.Event of the previous session
+            self.language = language
+            self.target_wid = target_wid
+            self.done = threading.Event()
 
     def __init__(self, args):
         self.args = args
+        # active = recording and accepting stop; a stopped session may still be
+        # transcribing, running its stop check or pasting corrections.
         self.active = False
+        self.session = None
 
         # Queues connecting the pipeline stages
         self.transcription_queue = queue.Queue()
@@ -1377,27 +1405,17 @@ class App():
         currently configured language untouched.
         """
         if self.active:
-            # toggle() calls start() first, so a stop press lands here too while
-            # still recording. Only a press after recording ended is a refused
-            # start: speech after it is not being recorded.
-            recorder = getattr(self, 'recorder', None)
-            if recorder is not None and not getattr(recorder, 'recording', False):
-                diagnostic('start_refused_busy')
-                print('[busy] Start refused: previous session still finishing')
             return None
 
         self.active = True
-        if language is not _UNSET:
-            self.transcription_worker.language = language
-        self.transcription_worker.reset_context()
+        previous = self.session.done if self.session is not None else None
+        if previous is not None and not previous.is_set():
+            # Previous session still finishing: record now, decode and paste after it.
+            diagnostic('start_while_finishing')
 
-        # Drain any leftover items from previous session
-        for q in (self.transcription_queue, self.typing_queue):
-            while not q.empty():
-                try:
-                    q.get_nowait()
-                except queue.Empty:
-                    break
+        # Fresh queues per session; a finishing session keeps its own.
+        self.transcription_queue = queue.Queue()
+        self.typing_queue = queue.Queue()
 
         self.ledger = CoverageLedger()
         diagnostic('session_start', max_seconds=MAX_SECONDS, pcm_bytes_per_minute=RATE*2*60)
@@ -1413,17 +1431,20 @@ class App():
             ledger=self.ledger,
         )
         self.recorder.start()
-        self.replayer.capture_target_window()
+        target_wid = self.replayer.window_id()
+        session = self.Session(self.transcription_queue, self.typing_queue, self.ledger,
+                               self.recorder, previous, language, target_wid)
+        self.session = session
 
         self.beep("start_recording", wait=False)
         print('Recording (streaming mode) ...')
 
         # Start transcription and typing threads
         self._transcription_thread = threading.Thread(
-            target=self._transcription_loop, daemon=True
+            target=self._transcription_loop, args=(session,), daemon=True
         )
         self._typing_thread = threading.Thread(
-            target=self._typing_loop, daemon=True
+            target=self._typing_loop, args=(session,), daemon=True
         )
         self._transcription_thread.start()
         self._typing_thread.start()
@@ -1448,6 +1469,8 @@ class App():
 
         # Stop recorder — this flushes remaining audio and sends sentinel
         self.recorder.stop()
+        # A new start may begin now; this session finishes on its own threads.
+        self.active = False
         return True
 
     def _auto_stop(self):
@@ -1463,6 +1486,7 @@ class App():
             self.timer = None
 
         self.recorder.stop()
+        self.active = False
         return True
 
     def timer_stop(self):
@@ -1486,7 +1510,25 @@ class App():
     def toggle(self):
         return self.start() or self.stop()
 
-    def _transcription_loop(self):
+    def _session_from_attributes(self):
+        return self.Session(self.transcription_queue, self.typing_queue,
+                            getattr(self, 'ledger', None), getattr(self, 'recorder', None))
+
+    def _await_previous(self, session):
+        """Block until the previous session has pasted its corrections; then
+        take over the shared worker and paste target. Audio keeps queueing."""
+        if session.previous is not None and not session.previous.is_set():
+            t0 = time.time()
+            if not session.previous.wait(session.PREVIOUS_WAIT_S):
+                diagnostic('previous_session_timeout', seconds=session.PREVIOUS_WAIT_S)
+            diagnostic('waited_for_previous', seconds=time.time() - t0)
+        if session.language is not _UNSET:
+            self.transcription_worker.language = session.language
+        self.transcription_worker.reset_context()
+        if session.target_wid is not None:
+            self.replayer.target_wid = session.target_wid
+
+    def _transcription_loop(self, session=None):
         """Consumer: takes audio chunks from transcription_queue, transcribes, puts text on typing_queue.
 
         Chunks arrive as (audio, is_boundary) tuples. Rather than transcribing
@@ -1498,11 +1540,16 @@ class App():
         or at end of stream. Nothing already typed is ever revised — the merge
         happens *before* the paste. paste_min_s=0 falls back to per-chunk.
         """
+        if session is None:
+            session = self._session_from_attributes()  # direct call, no start()
+        else:
+            self._await_previous(session)
         paste_min_samples = int(self.args.paste_min_s * StreamingRecorder.SAMPLE_RATE) if self.args.paste_min_s else 0
         pending = []
         pending_samples = 0
         range_start = 0
-        ledger = getattr(self, 'ledger', None)
+        ledger = session.ledger
+        transcription_queue, typing_queue = session.transcription_queue, session.typing_queue
 
         def flush():
             nonlocal pending, pending_samples
@@ -1535,18 +1582,18 @@ class App():
                 print('[transcribe] %.1fs audio (%d part%s) -> %.1fs processing: "%s"'
                       % (audio_dur, n_parts, '' if n_parts == 1 else 's', elapsed, text.strip()))
                 if text.strip():
-                    self.typing_queue.put((text, entry) if ledger else text)
+                    typing_queue.put((text, entry) if ledger else text)
             except Exception as e:
                 print('[transcribe] Error: %s' % e)
                 if ledger and entry is None:
                     ledger.outcome(entry_start, entry_start + len(merged), error=str(e))
 
         while True:
-            item = self.transcription_queue.get()
+            item = transcription_queue.get()
             if item is None:
                 # Sentinel: end of stream — paste whatever is still buffered.
                 flush()
-                self.typing_queue.put(None)
+                typing_queue.put(None)
                 break
 
             chunk, is_boundary = item[:2]
@@ -1560,14 +1607,23 @@ class App():
             if paste_min_samples == 0 or is_boundary or pending_samples >= paste_min_samples:
                 flush()
 
-    def _typing_loop(self):
+    def _typing_loop(self, session=None):
         """Consumer: takes text from typing_queue and types it."""
+        if session is None:
+            session = self._session_from_attributes()
+        try:
+            self._typing_session(session)
+        finally:
+            # Release the next session even if this one failed.
+            session.done.set()
+
+    def _typing_session(self, session):
         first_chunk = True
+        ledger = session.ledger
         while True:
-            text = self.typing_queue.get()
+            text = session.typing_queue.get()
             if text is None:
                 # Sentinel: end of stream (beep already played in stop())
-                ledger = getattr(self, 'ledger', None)
                 if ledger:
                     try:
                         # Corrections take the ordinary chunk path: clipboard plus
@@ -1584,8 +1640,12 @@ class App():
                         ledger.incident('stop_check_failed', error=str(exc))
                     finally:
                         ledger.frames.clear()
-                        self.recorder._raw_frames.clear()
-                self.active = False
+                        if session.recorder is not None:
+                            session.recorder._raw_frames.clear()
+                # Only a session that ended without stop() (e.g. capture error)
+                # still holds `active`; never clear a newer session's flag.
+                if getattr(self, 'session', None) in (None, session):
+                    self.active = False
                 print('Session ended.')
                 break
 
@@ -1607,7 +1667,7 @@ class App():
             except Exception as exc:
                 result = dict(ok=False, path='exception', error=str(exc))
             if entry is not None:
-                self.ledger.delivered(entry, result)
+                ledger.delivered(entry, result)
 
     def run(self):
         def normalize_key_names(keyseqs, parse=False):
