@@ -17,18 +17,45 @@ def diagnostic(kind: str, **details: Any) -> None:
         ensure_ascii=False), flush=True)
 
 
+ANCHOR_WORDS = 4
+
+
+def _delivered(entry: dict[str, Any]) -> bool:
+    """Text whose clipboard write and paste shortcut both succeeded."""
+    return bool(entry['text']) and bool((entry['delivery'] or {}).get('ok'))
+
+
+def _anchor(text: str, tail: bool) -> str:
+    words = text.split()
+    if len(words) <= ANCHOR_WORDS:
+        return ' '.join(words)
+    return ('…' + ' '.join(words[-ANCHOR_WORDS:])) if tail else (' '.join(words[:ANCHOR_WORDS]) + '…')
+
+
+def correction_text(before: str, after: str, text: str) -> str:
+    """Plain-language correction that quotes delivered text around the gap."""
+    if before and after:
+        where = 'tussen "%s" en "%s" is' % (_anchor(before, True), _anchor(after, False))
+    elif before:
+        where = 'na "%s" is' % _anchor(before, True)
+    elif after:
+        where = 'vóór "%s" is' % _anchor(after, False)
+    else:
+        where = 'in deze opname is'
+    return '[Correctie: %s waarschijnlijk dit gemist: "%s"]' % (where, text)
+
+
 class CoverageLedger:
-    def __init__(self, notice: Callable[[str], None] = lambda message: None) -> None:
+    def __init__(self) -> None:
         self.frames = []
         self.samples = 0
         self.entries = []
-        self.notice = notice
         self.started = time.time()
         self.warned = False
 
     def incident(self, kind: str, **details: Any) -> None:
+        # Journal only; no desktop notifications.
         diagnostic(kind, **details)
-        self.notice('Dictatie: ' + kind)
 
     def capture(self, data: bytes) -> bytes:
         room = MAX_SECONDS * RATE - self.samples
@@ -67,27 +94,52 @@ class CoverageLedger:
         if not result.get('ok') or result.get('path') != 'copyq':
             self.incident('delivery_degraded', start=entry['start'], result=result)
 
+    def _failed_delivery(self, e: dict[str, Any]) -> bool:
+        # An xclip fallback that still pasted is degraded (no CopyQ history) but
+        # landed; re-pasting it would duplicate the text in Mark's window.
+        return bool(e['text']) and not _delivered(e)
+
     def suspects(self) -> list[dict[str, Any]]:
         result = []
         for e in self.entries:
             duration = (e['end'] - e['start']) / RATE
             if (e['outcome'] == 'decoder_error'
                     or (duration >= 8 and len(e['text'].split()) < duration / 2)
-                    or (e['text'] and (not (e['delivery'] or {}).get('ok')
-                                      or (e['delivery'] or {}).get('path') != 'copyq'))):
+                    or self._failed_delivery(e)):
                 result.append(e)
+        return result
+
+    def _corrections(self, recovered: list[tuple[int, str]]) -> list[tuple[list[dict[str, Any]], str]]:
+        """One correction per gap: adjacent recovered ranges merge, anchors are
+        the nearest delivered text before and after the gap."""
+        groups = []
+        for index, text in recovered:
+            if groups and groups[-1][-1][0] == index - 1:
+                groups[-1].append((index, text))
+            else:
+                groups.append([(index, text)])
+        result = []
+        for group in groups:
+            first, last = group[0][0], group[-1][0]
+            before = next((e['text'] for e in reversed(self.entries[:first]) if _delivered(e)), '')
+            after = next((e['text'] for e in self.entries[last+1:] if _delivered(e)), '')
+            text = ' '.join(t for _, t in group)
+            result.append(([self.entries[i] for i, _ in group], correction_text(before, after, text)))
         return result
 
     def finish(self, decode: Callable[[np.ndarray], str],
                deliver: Callable[[str], dict[str, Any]]) -> list[str]:
-        """Called after original delivery queue drains. Never edit/paste corrections.
+        """Called after original delivery queue drains.
 
-        Retry each suspect exactly once, in <=10s windows; all corrections are
-        one separate, labelled clipboard item. No audio retained after return.
+        Retry each suspect exactly once, in <=10s windows. Corrections are
+        pasted through the ordinary chunk path (`deliver`), after the text that
+        was already pasted; earlier text is never edited. No audio retained
+        after return.
         """
         t0 = time.perf_counter()
         corrections = []
         corrected_entries = []
+        targets = []
         try:
             covered = self.entries[-1]['end'] if self.entries else 0
             # A missing queue tail is made explicit, not treated as silence.
@@ -95,12 +147,13 @@ class CoverageLedger:
                 self.outcome(start, min(start + 10 * RATE, self.samples), error='queue_gap')
             targets = self.suspects()
             raw = b''.join(self.frames) if targets else b''
+            index = {id(e): i for i, e in enumerate(self.entries)}
+            recovered_texts = []
             for e in targets:
                 self.incident('stop_check', start=e['start'], end=e['end'], reason=e['outcome'])
                 recovered = []
                 try:
-                    if e['text'] and (not (e['delivery'] or {}).get('ok')
-                                      or (e['delivery'] or {}).get('path') != 'copyq'):
+                    if self._failed_delivery(e):
                         recovered.append(e['text'])  # Delivery failure needs no GPU work.
                     else:
                         if e['outcome'] == 'decoder_error':
@@ -113,11 +166,8 @@ class CoverageLedger:
                     if not re.search(r'\w', text):
                         text = ''
                     # Do not re-deliver unchanged text that was already delivered.
-                    if text and text != (e['text'] if (e['delivery'] or {}).get('ok')
-                                       and (e['delivery'] or {}).get('path') == 'copyq' else ''):
-                        corrected_entries.append(e)
-                        corrections.append('[mogelijk gemist %.2f–%.2fs: %s]' %
-                                           (e['start_s'], e['end_s'], text))
+                    if text and text != (e['text'] if _delivered(e) else ''):
+                        recovered_texts.append((index[id(e)], text))
                     e['recovery'] = dict(text=text, at=time.time())
                     diagnostic('recovery_outcome', start=e['start'], end=e['end'], **e['recovery'])
                     if not text:
@@ -125,22 +175,22 @@ class CoverageLedger:
                 except Exception as exc:
                     e['recovery'] = dict(error=str(exc), at=time.time())
                     self.incident('recovery_failed', start=e['start'], error=str(exc))
-            if corrections:
+            for entries, correction in self._corrections(recovered_texts):
                 try:
-                    result = deliver('\n'.join(corrections))
+                    result = deliver(correction)
                 except Exception as exc:
                     result = dict(ok=False, path='exception', error=str(exc))
-                for e in corrected_entries:
-                    e['recovery']['delivery'] = dict(result, at=time.time(), paste='never_sent')
-                    diagnostic('correction_delivery', start=e['start'], end=e['end'],
-                               **e['recovery']['delivery'])
-                self.incident('corrections_clipboard' if result.get('ok') else 'corrections_delivery_failed',
-                              count=len(corrections))
+                corrections.append(correction)
+                corrected_entries.extend(entries)
+                for e in entries:
+                    e['recovery']['delivery'] = dict(result, at=time.time())
+                # Full text stays in the journal, also when the paste failed.
+                diagnostic('correction_delivery', start=entries[0]['start'], end=entries[-1]['end'],
+                           correction=correction, **dict(result, at=time.time()))
             diagnostic('stop_summary', samples=self.samples, ranges=len(self.entries),
                        suspects=len(targets), corrections=len(corrections),
                        unresolved_ranges=sum(not (e['recovery'] or {}).get('text') for e in targets),
-                       original_delivery_failures=sum(bool(e['text']) and not
-                           (e['delivery'] or {}).get('ok') for e in self.entries),
+                       original_delivery_failures=sum(self._failed_delivery(e) for e in self.entries),
                        correction_delivery_failures=sum(not
                            (e['recovery'].get('delivery') or {}).get('ok') for e in corrected_entries),
                        check_seconds=time.perf_counter()-t0,

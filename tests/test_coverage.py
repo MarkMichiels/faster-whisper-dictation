@@ -1,5 +1,8 @@
 """No microphone, desktop writes or model; pipeline uses actual app loop methods."""
 import ast
+import contextlib
+import io
+import json
 import queue
 import subprocess
 import sys
@@ -53,16 +56,24 @@ class CoverageTests(unittest.TestCase):
         obj = self.ledger()
         obj.outcome(0, 10*coverage.RATE, error='CUDA OOM')
         obj.outcome(10*coverage.RATE, 20*coverage.RATE, raw='Dank u wel.')
-        e = obj.outcome(20*coverage.RATE, 30*coverage.RATE, text='afgeleverd via fallback')
-        obj.delivered(e, dict(ok=True, path='xclip', copyq_add=1))
+        e = obj.outcome(20*coverage.RATE, 30*coverage.RATE, text='niet aangekomen tekst')
+        obj.delivered(e, dict(ok=False, path='none', copyq_add=1, xclip=1))
         self.assertEqual(len(obj.suspects()), 3)
         delivered = []
         output = obj.finish(lambda audio: 'teruggevonden woorden',
                             lambda text: delivered.append(text) or dict(ok=True, path='copyq'))
-        self.assertEqual(len(output), 3)
-        self.assertTrue(all(t.startswith('[mogelijk gemist ') for t in output))
-        self.assertEqual(len(delivered), 1)
+        # Three adjacent suspect ranges form one gap: one pasted correction.
+        self.assertEqual(output, delivered)
+        self.assertEqual(output, ['[Correctie: in deze opname is waarschijnlijk dit gemist: '
+                                  '"teruggevonden woorden teruggevonden woorden niet aangekomen tekst"]'])
         self.assertEqual(obj.frames, [])
+
+    def test_xclip_fallback_that_pasted_is_not_pasted_again(self):
+        obj = self.ledger(10)
+        e = obj.outcome(0, 10*coverage.RATE, text='deze zin werd al geplakt via xclip zonder CopyQ historie')
+        obj.delivered(e, dict(ok=True, path='xclip', copyq_add=1, paste='shortcut_sent_not_acknowledged'))
+        self.assertEqual(obj.suspects(), [])
+        self.assertEqual(obj.finish(lambda a: self.fail('no decode'), lambda t: self.fail('no paste')), [])
 
     def test_pipeline_originals_then_separate_correction(self):
         logic = load_logic()
@@ -76,20 +87,95 @@ class CoverageTests(unittest.TestCase):
         for start in (0, 10*coverage.RATE):
             app.transcription_queue.put((np.zeros(10*coverage.RATE, dtype=np.float32), True, start))
         app.transcription_queue.put(None)
-        originals, corrections = [], []
+        pasted = []
         app.replayer = types.SimpleNamespace(
-            type_text=lambda t: originals.append(t) or dict(ok=True, path='copyq'),
-            _set_clipboard=lambda t: corrections.append(t) or dict(ok=True, path='copyq'))
+            type_text=lambda t: pasted.append(t) or dict(ok=True, path='copyq',
+                                                         paste='shortcut_sent_not_acknowledged'),
+            _set_clipboard=lambda t: self.fail('corrections must use the ordinary paste path'))
         app.recorder = types.SimpleNamespace(_raw_frames=[b'audio'])
         app.active = True
         app._transcription_loop()
         app._typing_loop()
-        self.assertEqual(originals, ['Dit zijn de normale reeds afgeleverde woorden.'])
-        self.assertEqual(len(corrections), 1)
-        self.assertIn('[mogelijk gemist 0.00–10.00s:', corrections[0])
+        # Original first, then the correction pasted through the same path, space-separated.
+        self.assertEqual(pasted, [
+            'Dit zijn de normale reeds afgeleverde woorden.',
+            ' [Correctie: vóór "Dit zijn de normale…" is waarschijnlijk dit gemist: '
+            '"Dit zijn teruggevonden woorden uit het eerste stuk."]'])
+        self.assertEqual(ledger.entries[0]['recovery']['delivery']['paste'],
+                         'shortcut_sent_not_acknowledged')
         self.assertFalse(app.active)
         self.assertEqual(ledger.frames, [])
         self.assertEqual(app.recorder._raw_frames, [])
+
+    def test_correction_wording_without_seconds(self):
+        f = coverage.correction_text
+        self.assertEqual(f('Ik denk dat het eigenlijk een', 'hetgeen dat Jonas gisteren zei.', 'gemiste tekst'),
+                         '[Correctie: tussen "…dat het eigenlijk een" en "hetgeen dat Jonas gisteren…" '
+                         'is waarschijnlijk dit gemist: "gemiste tekst"]')
+        self.assertEqual(f('kort stuk', '', 'staart'),
+                         '[Correctie: na "kort stuk" is waarschijnlijk dit gemist: "staart"]')
+        self.assertEqual(f('', 'Begin van de rest van de tekst', 'kop'),
+                         '[Correctie: vóór "Begin van de rest…" is waarschijnlijk dit gemist: "kop"]')
+        for text in (f('a b', 'c d', 'x'), f('', '', 'x')):
+            self.assertNotRegex(text, r'\d|seconde|s:')
+
+    def test_anchors_from_delivered_text_one_correction_per_gap(self):
+        obj = self.ledger(50)
+        R = coverage.RATE
+        def ok(start, end, text):
+            obj.delivered(obj.outcome(start, end, text), dict(ok=True, path='copyq'))
+        ok(0, 10*R, 'Het eerste stuk eindigt dat het eigenlijk een')
+        obj.outcome(10*R, 20*R, error='OOM')
+        ok(20*R, 30*R, 'hetgeen dat Jonas zei over de pomp')
+        ok(30*R, 40*R, 'en dan het slot van de zin')
+        obj.outcome(40*R, 50*R, error='OOM')
+        decoded = iter(['eerste gat', 'tweede gat'])
+        pasted = []
+        out = obj.finish(lambda a: next(decoded), lambda t: pasted.append(t) or dict(ok=True, path='copyq'))
+        self.assertEqual(out, pasted)
+        self.assertEqual(out, [
+            '[Correctie: tussen "…dat het eigenlijk een" en "hetgeen dat Jonas zei…" '
+            'is waarschijnlijk dit gemist: "eerste gat"]',
+            '[Correctie: na "…slot van de zin" is waarschijnlijk dit gemist: "tweede gat"]'])
+
+    def test_failed_delivery_pasted_as_correction_without_decode(self):
+        obj = self.ledger(30)
+        R = coverage.RATE
+        obj.delivered(obj.outcome(0, 10*R, 'vooraf goed aangekomen'), dict(ok=True, path='copyq'))
+        lost = obj.outcome(10*R, 20*R, 'herkend maar niet geplakt')
+        obj.delivered(lost, dict(ok=False, path='copyq', paste='failed'))
+        obj.delivered(obj.outcome(20*R, 30*R, 'daarna weer goed'), dict(ok=True, path='copyq'))
+        pasted = []
+        obj.finish(lambda a: self.fail('delivery failure needs no decode'),
+                   lambda t: pasted.append(t) or dict(ok=True, path='copyq'))
+        self.assertEqual(pasted, ['[Correctie: tussen "vooraf goed aangekomen" en "daarna weer goed" '
+                                  'is waarschijnlijk dit gemist: "herkend maar niet geplakt"]'])
+
+    def test_failed_correction_paste_stays_in_journal(self):
+        obj = self.ledger(10)
+        obj.outcome(0, 10*coverage.RATE, error='OOM')
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            obj.finish(lambda a: 'woorden', lambda t: dict(ok=False, path='copyq', paste='failed'))
+        line = next(l for l in out.getvalue().splitlines() if '"correction_delivery"' in l)
+        record = json.loads(line.removeprefix('DCT-COVERAGE '))
+        self.assertFalse(record['ok'])
+        self.assertIn('"woorden"', record['correction'])
+        self.assertFalse(obj.entries[0]['recovery']['delivery']['ok'])
+
+    def test_no_desktop_notifications(self):
+        source = (Path(__file__).resolve().parents[1] / 'dictation.py').read_text()
+        self.assertNotIn('notify-send', source)
+        self.assertNotIn('notify-send', Path(coverage.__file__).read_text())
+        calls = []
+        with patch.object(subprocess, 'run', lambda *a, **kw: calls.append(a)), \
+                contextlib.redirect_stdout(io.StringIO()):
+            obj = self.ledger(10)
+            obj.outcome(0, 10*coverage.RATE, error='OOM')
+            obj.incident('capture_error', error='x')
+            obj.finish(lambda a: 'woorden', lambda t: dict(ok=True, path='copyq'))
+        self.assertEqual(calls, [])
+        self.assertFalse(hasattr(load_logic()['App'], '_coverage_notice'))
 
     def test_release_even_when_recovery_or_delivery_raises(self):
         for fail_decode in (True, False):

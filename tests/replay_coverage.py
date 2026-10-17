@@ -43,9 +43,10 @@ for start in range(0, len(audio), 10*RATE):
     app.transcription_queue.put((audio[start:start+10*RATE], True, start))
 app.transcription_queue.put(None)
 originals, corrections = [], []
-app.replayer = types.SimpleNamespace(
-    type_text=lambda t: originals.append(t) or dict(ok=True, path='copyq'),
-    _set_clipboard=lambda t: corrections.append(t) or dict(ok=True, path='copyq'))
+def paste(text):
+    (corrections if text.lstrip().startswith('[Correctie: ') else originals).append(text)
+    return dict(ok=True, path='copyq')
+app.replayer = types.SimpleNamespace(type_text=paste)
 app.recorder = types.SimpleNamespace(_raw_frames=[])
 app.active = True
 with contextlib.redirect_stdout(io.StringIO()):
@@ -58,7 +59,7 @@ with contextlib.redirect_stdout(io.StringIO()):
 assert ledger.frames == [] and not app.active
 first_recovered = ledger.entries[0]['recovery'].get('text', '')
 assert first_recovered and not logic['is_hallucination'](first_recovered), 'simulated loss not recovered as words'
-assert corrections and corrections[0].startswith('[mogelijk gemist ')
+assert corrections and corrections[0].lstrip().startswith('[Correctie: ')
 print(json.dumps(dict(model='large-v3', device='cpu', compute_type='int8', threads=6,
     audio_seconds=len(audio)/RATE, ranges=len(ledger.entries), injected_decoder_errors=1,
     ordinary_seconds=normal_seconds, stop_check_extra_seconds=extra_seconds,

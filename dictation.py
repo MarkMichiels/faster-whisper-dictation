@@ -1392,7 +1392,7 @@ class App():
                 except queue.Empty:
                     break
 
-        self.ledger = CoverageLedger(self._coverage_notice)
+        self.ledger = CoverageLedger()
         diagnostic('session_start', max_seconds=MAX_SECONDS, pcm_bytes_per_minute=RATE*2*60)
         # Create fresh recorder and start BEFORE beep so no audio is missed
         self.recorder = StreamingRecorder(
@@ -1479,31 +1479,6 @@ class App():
     def toggle(self):
         return self.start() or self.stop()
 
-    def _coverage_notice(self, message):
-        labels = {
-            'decoder_error': 'Decoderfout; controle volgt bij stop.',
-            'capture_error': 'Opname onderbroken; zie journal.',
-            'capture_open_error': 'Microfoon kon niet starten.',
-            'capture_start_delay': 'Microfoon startte vertraagd.',
-            'delivery_degraded': 'Aflevering onzeker; controle bij stop.',
-            'suspect_decode': 'Verdachte herkenning; controle bij stop.',
-            'stop_check': 'Controleert mogelijk gemist stuk.',
-            'corrections_clipboard': 'Mogelijk gemiste tekst staat apart op klembord; plak zelf.',
-            'corrections_delivery_failed': 'Hersteltekst kon niet naar klembord; zie journal.',
-            'duration_warning': 'Opname stopt over een minuut (RAM-grens).',
-            'duration_limit': 'Opname gestopt: maximum 30 minuten.',
-            'timer_stop': 'Opname gestopt door tijdslimiet.',
-            'unresolved': 'Geen hersteltekst gevonden; zie journal.',
-            'recovery_failed': 'Herstelpoging mislukt; zie journal.',
-        }
-        message = labels.get(message.removeprefix('Dictatie: '), message)
-        try:
-            subprocess.run(['notify-send', '--app-name=Dictatie', '--expire-time=6000',
-                            'Dekkingscontrole', message],
-                           timeout=2, check=True, stderr=subprocess.DEVNULL)
-        except Exception as exc:
-            diagnostic('notification_failed', error=str(exc))
-
     def _transcription_loop(self):
         """Consumer: takes audio chunks from transcription_queue, transcribes, puts text on typing_queue.
 
@@ -1588,9 +1563,16 @@ class App():
                 ledger = getattr(self, 'ledger', None)
                 if ledger:
                     try:
+                        # Corrections take the ordinary chunk path: clipboard plus
+                        # paste into the start window, after the text pasted so far.
+                        def deliver(correction):
+                            nonlocal first_chunk
+                            prefix = '' if first_chunk else ' '
+                            first_chunk = False
+                            return self.replayer.type_text(prefix + correction)
                         ledger.finish(
                             lambda audio: self.transcription_worker.transcribe_chunk(audio, recovery=True),
-                            self.replayer._set_clipboard)
+                            deliver)
                     except Exception as exc:
                         ledger.incident('stop_check_failed', error=str(exc))
                     finally:
