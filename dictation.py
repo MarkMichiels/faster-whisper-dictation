@@ -1377,10 +1377,13 @@ class App():
         currently configured language untouched.
         """
         if self.active:
-            # Previous session is still finishing (typing or stop check). Make a
-            # refused start visible: speech after it is not being recorded.
-            diagnostic('start_refused_busy')
-            print('[busy] Start refused: previous session still finishing')
+            # toggle() calls start() first, so a stop press lands here too while
+            # still recording. Only a press after recording ended is a refused
+            # start: speech after it is not being recorded.
+            recorder = getattr(self, 'recorder', None)
+            if recorder is not None and not getattr(recorder, 'recording', False):
+                diagnostic('start_refused_busy')
+                print('[busy] Start refused: previous session still finishing')
             return None
 
         self.active = True
