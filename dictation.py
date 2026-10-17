@@ -1453,23 +1453,27 @@ class App():
         self.typing_queue = queue.Queue()
 
         self.ledger = CoverageLedger()
+        # Publish the new session before anything slow (recorder start, xdotool):
+        # a previous session that ends meanwhile must see it is no longer the
+        # current one, or it would clear `active` while this one records.
+        session = self.Session(self.transcription_queue, self.typing_queue, self.ledger,
+                               None, previous, language, None)
+        self.session = session
         diagnostic('session_start', max_seconds=MAX_SECONDS, pcm_bytes_per_minute=RATE*2*60)
         # Create fresh recorder and start BEFORE beep so no audio is missed
         self.recorder = StreamingRecorder(
             self.transcription_queue,
             silence_ms=self.args.silence_ms,
             auto_stop_silence_s=self.args.auto_stop_silence or None,
-            on_auto_stop=self._auto_stop,
+            on_auto_stop=lambda: self._auto_stop(session),
             min_chunk_s=self.args.min_chunk_s,
             max_chunk_s=self.args.max_chunk_s,
             eager_prob=self.args.eager_prob,
             ledger=self.ledger,
         )
+        session.recorder = self.recorder
         self.recorder.start()
-        target_wid = self.replayer.window_id()
-        session = self.Session(self.transcription_queue, self.typing_queue, self.ledger,
-                               self.recorder, previous, language, target_wid)
-        self.session = session
+        session.target_wid = self.replayer.window_id()
 
         self.beep("start_recording", wait=False)
         print('Recording (streaming mode) ...')
@@ -1508,8 +1512,15 @@ class App():
         self.active = False
         return True
 
-    def _auto_stop(self):
+    def _auto_stop(self, session=None):
         """Auto-stop: double beep to distinguish from manual stop."""
+        if session is not None and session is not getattr(self, 'session', None):
+            # Silence timeout of an older session: stop only its own recorder,
+            # never the current session's.
+            if session.recorder is not None and getattr(session.recorder, 'recording', False):
+                diagnostic('stale_auto_stop')
+                session.recorder.stop()
+            return None
         if not self.active:
             return None
 

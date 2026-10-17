@@ -269,6 +269,81 @@ class CoverageTests(unittest.TestCase):
         self.assertEqual(app.transcription_worker.language, 'en')
         self.assertFalse(app.active)
 
+    def test_previous_session_ending_during_start_keeps_new_session_active(self):
+        """Regression 18/10: A ended while B's start was still opening (xdotool),
+        cleared `active`, so the next press started C instead of stopping B and
+        sessions chained forever. A stale auto-stop of A must not stop B either."""
+        R = coverage.RATE
+        logic = load_logic()
+        release, a_checking = threading.Event(), threading.Event()
+        recorders, holder = [], {}
+
+        class FakeRecorder:
+            SAMPLE_RATE = R
+            def __init__(self, transcription_queue, ledger=None, on_auto_stop=None, **kw):
+                self.queue, self.ledger, self._raw_frames = transcription_queue, ledger, []
+                self.on_auto_stop, self.recording, self.stops = on_auto_stop, False, 0
+                recorders.append(self)
+            def start(self):
+                self.recording = True
+                self.ledger.capture(np.full(R, 8000, dtype=np.int16).tobytes())
+            def stop(self):
+                self.stops += 1
+                if not self.recording:
+                    return
+                self.recording = False
+                self.queue.put((np.full(R, 0.5, dtype=np.float32), True, 0))
+                self.queue.put(None)
+
+        class FakeWorker:
+            language = 'nl'
+            def reset_context(self):
+                pass
+            def transcribe_chunk(self, audio, recovery=False):
+                return 'tekst'
+
+        class FakeReplayer:
+            target_wid = None
+            calls = 0
+            def window_id(self):
+                FakeReplayer.calls += 1
+                if FakeReplayer.calls == 2:  # B is starting: let A finish right now
+                    release.set()
+                    assert holder['a'].done.wait(5)
+                return 'win'
+            def type_text(self, text):
+                if not release.is_set():  # A is still pasting when B is pressed
+                    a_checking.set()
+                    release.wait(5)
+                return dict(ok=True, path='copyq', paste='shortcut_sent_not_acknowledged')
+
+        logic.update(StreamingRecorder=FakeRecorder, CoverageLedger=coverage.CoverageLedger,
+                     diagnostic=coverage.diagnostic, MAX_SECONDS=coverage.MAX_SECONDS, RATE=R)
+        app = logic['App'].__new__(logic['App'])
+        app.args = types.SimpleNamespace(paste_min_s=0, silence_ms=1000, auto_stop_silence=0,
+                                         min_chunk_s=1, max_chunk_s=10, eager_prob=0.5, max_time=60)
+        app.active, app.session, app.timer = False, None, None
+        app.beep = lambda *a, **kw: None
+        app.transcription_worker, app.replayer = FakeWorker(), FakeReplayer()
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            self.assertTrue(app.start('nl'))
+            holder['a'] = app.session
+            self.assertTrue(app.stop())
+            self.assertTrue(a_checking.wait(5))
+            self.assertTrue(app.start('nl'))  # A ends inside this call
+            session_b = app.session
+            self.assertTrue(holder['a'].done.is_set())
+            self.assertTrue(app.active)  # B still records
+            recorders[0].on_auto_stop()  # stale silence timeout of A
+            self.assertTrue(recorders[1].recording)
+            self.assertTrue(app.active)
+            app.toggle()  # the next press stops B, it does not start C
+            self.assertEqual(len(recorders), 2)
+            self.assertFalse(recorders[1].recording)
+            self.assertTrue(session_b.done.wait(5))
+        self.assertFalse(app.active)
+
     def test_release_even_when_recovery_or_delivery_raises(self):
         for fail_decode in (True, False):
             obj = self.ledger(1)
