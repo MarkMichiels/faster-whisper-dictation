@@ -30,6 +30,12 @@ def replayer_class():
 
 
 class CoverageTests(unittest.TestCase):
+    def setUp(self):
+        # Delivery-count tests predate the end-of-session status line.
+        patcher = patch.object(coverage, 'STOP_STATUS', False)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
     def ledger(self, seconds=30):
         obj = coverage.CoverageLedger()
         obj.capture(np.arange(seconds * coverage.RATE, dtype=np.int16).tobytes())
@@ -279,3 +285,25 @@ class CoverageTests(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class StopStatusTests(unittest.TestCase):
+    def test_status_texts(self):
+        self.assertEqual(coverage.stop_status(0, 0, 0, 0.04), '[Controle: niets gemist, 0,0 s]')
+        self.assertEqual(coverage.stop_status(2, 1, 1, 2.14),
+                         '[Controle: 2 stukken nagekeken, 1 correctie, 1 niet terug te vinden, 2,1 s]')
+
+    def test_status_pasted_last_and_only_after_delivered_text(self):
+        obj = coverage.CoverageLedger()
+        obj.capture(np.zeros(2 * coverage.RATE, dtype=np.int16).tobytes())
+        obj.outcome(0, 2 * coverage.RATE, raw='hallo', text='hallo')
+        obj.entries[-1]['delivery'] = dict(ok=True, path='copyq')
+        pasted = []
+        with contextlib.redirect_stdout(io.StringIO()):
+            obj.finish(lambda audio: '', lambda text: pasted.append(text) or dict(ok=True))
+        self.assertEqual(len(pasted), 1)
+        self.assertTrue(pasted[0].startswith('[Controle: niets gemist, '))
+        empty = coverage.CoverageLedger()
+        with contextlib.redirect_stdout(io.StringIO()):
+            empty.finish(lambda audio: '', lambda text: pasted.append(text) or dict(ok=True))
+        self.assertEqual(len(pasted), 1)

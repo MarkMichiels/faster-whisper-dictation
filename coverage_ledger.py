@@ -45,6 +45,25 @@ def correction_text(before: str, after: str, text: str) -> str:
     return '[Correctie: %s waarschijnlijk dit gemist: "%s"]' % (where, text)
 
 
+# Mark 17/10: for now, always end a session with a short visible check line so
+# he can see that the check ran, what it found and what it cost. Set False to
+# drop it once the check has proven itself.
+STOP_STATUS = True
+
+
+def stop_status(checked: int, corrected: int, unresolved: int, seconds: float) -> str:
+    """Short Dutch end-of-session line, e.g. '[Controle: niets gemist, 0,1 s]'."""
+    took = ('%.1f s' % seconds).replace('.', ',')
+    if not checked:
+        return '[Controle: niets gemist, %s]' % took
+    parts = ['%d %s nagekeken' % (checked, 'stuk' if checked == 1 else 'stukken')]
+    if corrected:
+        parts.append('%d %s' % (corrected, 'correctie' if corrected == 1 else 'correcties'))
+    if unresolved:
+        parts.append('%d niet terug te vinden' % unresolved)
+    return '[Controle: %s, %s]' % (', '.join(parts), took)
+
+
 class CoverageLedger:
     def __init__(self) -> None:
         self.frames = []
@@ -187,6 +206,15 @@ class CoverageLedger:
                 # Full text stays in the journal, also when the paste failed.
                 diagnostic('correction_delivery', start=entries[0]['start'], end=entries[-1]['end'],
                            correction=correction, **dict(result, at=time.time()))
+            if STOP_STATUS and (corrections or any(_delivered(e) for e in self.entries)):
+                status = stop_status(len(targets), len(corrections),
+                                     sum(not (e['recovery'] or {}).get('text') for e in targets),
+                                     time.perf_counter() - t0)
+                try:
+                    result = deliver(status)
+                except Exception as exc:
+                    result = dict(ok=False, path='exception', error=str(exc))
+                diagnostic('stop_status_delivery', status=status, **dict(result, at=time.time()))
             diagnostic('stop_summary', samples=self.samples, ranges=len(self.entries),
                        suspects=len(targets), corrections=len(corrections),
                        unresolved_ranges=sum(not (e['recovery'] or {}).get('text') for e in targets),
