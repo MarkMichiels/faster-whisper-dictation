@@ -7,7 +7,11 @@ import threading
 import queue
 import time
 import unittest
+import sys
 import numpy as np
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+import coverage_ledger
 
 
 def load_logic(path=None):
@@ -22,7 +26,8 @@ def load_logic(path=None):
         elif isinstance(node, ast.ClassDef) and node.name in ('TranscriptionWorker', 'StreamingRecorder', 'App'):
             nodes.append(node)
     ns = {'re': re, 'np': np, 'threading': threading, 'queue': queue, 'time': time,
-          'platform': types.SimpleNamespace(system=lambda: 'Linux')}
+          'platform': types.SimpleNamespace(system=lambda: 'Linux'),
+          'audio_stats': coverage_ledger.audio_stats, 'silent_audio': coverage_ledger.silent_audio}
     exec(compile(ast.Module(body=nodes, type_ignores=[]), str(path), 'exec'), ns)
     return ns
 

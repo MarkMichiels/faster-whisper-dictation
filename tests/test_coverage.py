@@ -91,7 +91,8 @@ class CoverageTests(unittest.TestCase):
                                           'Dit zijn teruggevonden woorden uit het eerste stuk.'])
         app.transcription_queue, app.typing_queue = queue.Queue(), queue.Queue()
         for start in (0, 10*coverage.RATE):
-            app.transcription_queue.put((np.zeros(10*coverage.RATE, dtype=np.float32), True, start))
+            # Audible audio: an all-zero range is now (rightly) treated as silence.
+            app.transcription_queue.put((np.full(10*coverage.RATE, 0.1, dtype=np.float32), True, start))
         app.transcription_queue.put(None)
         pasted = []
         app.replayer = types.SimpleNamespace(
@@ -198,9 +199,9 @@ class CoverageTests(unittest.TestCase):
                 recorders.append(self)
             def start(self):
                 events.append('record ' + self.name)  # mic open: audio is captured from here
-                self.ledger.capture(np.zeros(2*R, dtype=np.int16).tobytes())
+                self.ledger.capture(np.full(2*R, 8000, dtype=np.int16).tobytes())  # audible
             def stop(self):
-                value = 0.0 if self.name == 'A' else 1.0
+                value = 0.25 if self.name == 'A' else 1.0
                 for start in (0, R):
                     self.queue.put((np.full(R, value, dtype=np.float32), True, start))
                 self.queue.put(None)
@@ -210,7 +211,7 @@ class CoverageTests(unittest.TestCase):
             def reset_context(self):
                 events.append('reset ' + str(self.language))
             def transcribe_chunk(self, audio, recovery=False):
-                name = 'A' if audio[0] == 0 else 'B'
+                name = 'A' if audio[0] < 0.5 else 'B'
                 if recovery:
                     a_checking.set()
                     release.wait(5)

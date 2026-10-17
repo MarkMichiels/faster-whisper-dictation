@@ -14,7 +14,7 @@ from faster_whisper.vad import get_speech_timestamps, VadOptions, get_vad_model
 from pynput import keyboard
 from pynput import mouse
 from transitions import Machine
-from coverage_ledger import CoverageLedger, diagnostic, MAX_SECONDS, RATE
+from coverage_ledger import CoverageLedger, diagnostic, MAX_SECONDS, RATE, audio_stats, silent_audio
 
 # PortAudio paInputOverflowed: input samples were dropped by the driver.
 INPUT_OVERFLOWED_ERRNO = -9981  # pyaudio.paInputOverflowed
@@ -56,6 +56,18 @@ HALLUCINATION_PHRASES = (
     'ondertiteling',
     'muziek',
     'applaus',
+    # Subtitle sound captions (17/10: 'ZANG EN MUZIEK' on 10.5 s of silence).
+    'zang',
+    'zang en muziek',
+    'muziek en zang',
+    'muziek speelt',
+    'rustige muziek',
+    'spannende muziek',
+    'vrolijke muziek',
+    'gelach',
+    'stilte',
+    'ondertitels ingevoegd door de amara.org gemeenschap',
+    'ondertiteling ingevoegd door de amara.org gemeenschap',
     'thank you for watching',
     'thanks for watching',
     'subtitles by the amara.org community',
@@ -79,6 +91,17 @@ def _phrase_key(text):
 
 _HALLUCINATION_KEYS = frozenset(_phrase_key(p) for p in HALLUCINATION_PHRASES)
 
+# Families rather than single strings, still whole-chunk only:
+# a broadcaster ident with any year, a subtitle credit line ("Ondertiteling
+# door ...", "Subtitles by ..."), and a chunk made only of sound-caption words
+# ("MUZIEK. ZANG.", "muziek en applaus").
+_IDENT_RE = re.compile(r'^tv gelderland(?: \d{2,4})?$')
+_CREDIT_RE = re.compile(r'^(?:ondertitel\w*|subtitle[sd]?)\b.*\b(?:door|by|amara|ingevoegd|gemeenschap|community)\b')
+_SOUND_WORDS = frozenset(('muziek', 'zang', 'applaus', 'gelach', 'gejuich', 'stilte',
+                          'music', 'applause', 'laughter', 'silence', 'singing'))
+# "(muziek speelt)", "[Gelach]", "*zucht*": a short chunk wholly in caption brackets.
+_BRACKETED_RE = re.compile(r'^[\[(\u266a*]+[^\[\]()]{1,40}[\])\u266a*]+[.!]?$')
+
 
 def is_hallucination(text):
     """True when the whole chunk is a known silence artefact rather than speech."""
@@ -88,7 +111,15 @@ def is_hallucination(text):
     # A chunk of pure punctuation ('***', '...', '.') carries no words at all.
     if not re.search(r'[a-zA-Z0-9]', stripped):
         return True
-    return _phrase_key(stripped) in _HALLUCINATION_KEYS
+    key = _phrase_key(stripped)
+    if key in _HALLUCINATION_KEYS or _IDENT_RE.match(key):
+        return True
+    words = key.split()
+    if _CREDIT_RE.match(key) and len(words) <= 10:
+        return True
+    if any(w in _SOUND_WORDS for w in words) and all(w in _SOUND_WORDS or w in ('en', 'and') for w in words):
+        return True
+    return bool(_BRACKETED_RE.match(stripped)) and len(words) <= 4
 
 
 def break_rule_runs(text):
@@ -131,6 +162,10 @@ def suspect_decode(text, duration):
     if _PAUSE_RUN_RE.search(text) or _REPEAT_RE.search(text):
         return True
     return duration >= 8 and len(re.findall(r'\w+', text)) < duration / 2
+
+
+# Peak below this on a silent range means nothing near speech level arrived.
+SILENT_PEAK_DBFS = -50.0
 
 
 def sanitize_transcript(text, drop_phrases=True, space_runs=True, ellipsis_style='space'):
@@ -1574,9 +1609,26 @@ class App():
             try:
                 t0 = time.time()
                 text = self.transcription_worker.transcribe_chunk(merged)
+                raw = getattr(self.transcription_worker, 'last_raw', text)
+                audio = audio_stats(merged)
+                discard = None
+                if text.strip() and silent_audio(audio) and (
+                        suspect_decode(text, len(merged) / StreamingRecorder.SAMPLE_RATE)
+                        or audio['peak_dbfs'] < SILENT_PEAK_DBFS):
+                    # No 150 ms of speech energy in the whole range, and either
+                    # the text is already suspect (too few words for the audio)
+                    # or not one sample came near speech level: whatever Whisper
+                    # made of it is not Mark's voice. Never paste it, and keep it
+                    # out of the next decode's prompt. Quiet but plausible short
+                    # text (peak above the floor) is still pasted.
+                    print('[filter] Dropped text on silent audio: %r (%s)' % (text.strip(), audio))
+                    raw, text, discard = raw or text, '', 'silent_audio'
+                    reset = getattr(self.transcription_worker, 'reset_context', None)
+                    if reset:
+                        reset()
                 if ledger:
-                    entry = ledger.outcome(entry_start, entry_start + len(merged), text,
-                                           getattr(self.transcription_worker, 'last_raw', text))
+                    entry = ledger.outcome(entry_start, entry_start + len(merged), text, raw,
+                                           audio=audio, discard_reason=discard)
                 elapsed = time.time() - t0
                 audio_dur = len(merged) / StreamingRecorder.SAMPLE_RATE
                 print('[transcribe] %.1fs audio (%d part%s) -> %.1fs processing: "%s"'
@@ -1635,7 +1687,7 @@ class App():
                             return self.replayer.type_text(prefix + correction)
                         ledger.finish(
                             lambda audio: self.transcription_worker.transcribe_chunk(audio, recovery=True),
-                            deliver)
+                            deliver, is_artifact=is_hallucination)
                     except Exception as exc:
                         ledger.incident('stop_check_failed', error=str(exc))
                     finally:
