@@ -454,7 +454,7 @@ class StopStatusTests(unittest.TestCase):
         self.assertEqual(coverage.stop_status(2, 1, 1, 2.14),
                          '[Controle: 2 stukken nagekeken, 1 correctie, 1 niet terug te vinden, 2,1 s]')
 
-    def test_status_pasted_last_and_only_after_delivered_text(self):
+    def test_no_status_line_when_nothing_deviated(self):
         obj = coverage.CoverageLedger()
         obj.capture(np.zeros(2 * coverage.RATE, dtype=np.int16).tobytes())
         obj.outcome(0, 2 * coverage.RATE, raw='hallo', text='hallo')
@@ -462,9 +462,8 @@ class StopStatusTests(unittest.TestCase):
         pasted = []
         with contextlib.redirect_stdout(io.StringIO()):
             obj.finish(lambda audio: '', lambda text: pasted.append(text) or dict(ok=True))
-        self.assertEqual(len(pasted), 1)
-        self.assertTrue(pasted[0].startswith('[Controle: niets gemist, '))
+        self.assertEqual(pasted, [])  # Mark 18/10: clean session pastes nothing extra.
         empty = coverage.CoverageLedger()
         with contextlib.redirect_stdout(io.StringIO()):
             empty.finish(lambda audio: '', lambda text: pasted.append(text) or dict(ok=True))
-        self.assertEqual(len(pasted), 1)
+        self.assertEqual(pasted, [])

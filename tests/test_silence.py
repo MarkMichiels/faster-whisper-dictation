@@ -149,8 +149,7 @@ class PipelineSilenceTests(unittest.TestCase):
             ja = noise(2.0)
             ja[R:R + int(0.3 * R)] += speech(0.3, -30.0)
             pasted, ledger, _, _ = self.run_session([ja], ['Ja.'])
-        self.assertEqual(pasted[0], 'Ja.')
-        self.assertTrue(pasted[1].startswith(' [Controle: niets gemist'))
+        self.assertEqual(pasted, ['Ja.'])  # Clean session: no check line.
 
     def test_very_quiet_short_word_is_still_pasted(self):
         # Below the voiced threshold, but peaks near speech level and the text
@@ -200,8 +199,7 @@ class CorrectionTests(unittest.TestCase):
             ledger = self.session(['Er is een, ja.'])
             corrections, pasted, out = self.finish(ledger, recovered)
             self.assertEqual(corrections, [], recovered)
-            self.assertEqual(len(pasted), 1)
-            self.assertRegex(pasted[0], r'^\[Controle: 1 stuk nagekeken, \d+,\d s\]$')
+            self.assertEqual(pasted, [])  # Duplicate only: nothing new, no check line.
             record = lines(out, 'recovery_outcome')[0]
             self.assertTrue(record['duplicate'])
             self.assertNotIn('*', record['text'])

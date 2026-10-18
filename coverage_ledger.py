@@ -128,9 +128,10 @@ def correction_text(before: str, after: str, text: str) -> str:
     return '[Correctie: %s waarschijnlijk dit gemist: "%s"]' % (where, text)
 
 
-# Mark 17/10: for now, always end a session with a short visible check line so
-# he can see that the check ran, what it found and what it cost. Set False to
-# drop it once the check has proven itself.
+# Mark 18/10: paste the check line only when something deviated (a correction
+# or a range whose text could not be found back). A clean session ends with
+# nothing extra in the text; the journal still logs stop_summary. Set False to
+# never paste it.
 STOP_STATUS = True
 
 
@@ -329,8 +330,9 @@ class CoverageLedger:
                 # Full text stays in the journal, also when the paste failed.
                 diagnostic('correction_delivery', start=entries[0]['start'], end=entries[-1]['end'],
                            correction=correction, **dict(result, at=time.time()))
-            if STOP_STATUS and (corrections or any(_delivered(e) for e in self.entries)):
-                status = stop_status(len(targets), len(corrections), self._unresolved(targets),
+            unresolved = self._unresolved(targets)
+            if STOP_STATUS and (corrections or unresolved):
+                status = stop_status(len(targets), len(corrections), unresolved,
                                      time.perf_counter() - t0,
                                      sum(bool((e['recovery'] or {}).get('silent')) for e in targets))
                 try:
