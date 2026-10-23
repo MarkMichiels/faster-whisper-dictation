@@ -1,0 +1,10 @@
+test_cuda_oom_emits_one_bounded_snapshot_and_no_retry (test_filter_oom.FilterOOMTests.test_cuda_oom_emits_one_bounded_snapshot_and_no_retry) ... FAIL
+test_non_oom_does_not_query_gpu (test_filter_oom.FilterOOMTests.test_non_oom_does_not_query_gpu) ... ok
+test_oom_during_retry_and_recovery_also_logged_once (test_filter_oom.FilterOOMTests.test_oom_during_retry_and_recovery_also_logged_once) ... FAIL
+test_oom_snapshot_failure_is_bounded_and_preserves_original_error (test_filter_oom.FilterOOMTests.test_oom_snapshot_failure_is_bounded_and_preserves_original_error) ... FAIL
+test_recovery_keeps_audible_thanks_but_not_captions (test_filter_oom.FilterOOMTests.test_recovery_keeps_audible_thanks_but_not_captions) ... FAIL
+test_short_exact_repeat_on_near_silence_is_rejected (test_filter_oom.FilterOOMTests.test_short_exact_repeat_on_near_silence_is_rejected) ... FAIL
+test_thanks_requires_silence_evidence (test_filter_oom.FilterOOMTests.test_thanks_requires_silence_evidence) ... FAIL
+test_thanks_with_energy_survives_without_retry (test_filter_oom.FilterOOMTests.test_thanks_with_energy_survives_without_retry) ... 
+Ran 8 tests in 0.167s
+FAILED (failures=16)

@@ -42,15 +42,16 @@ _UNSET = object()
 # enough noise to pass VAD. Only a chunk that is *entirely* one of these
 # phrases is dropped, never a phrase inside a real sentence, and every drop is
 # printed so nothing disappears silently from the journal.
+# These can also be literal dictation. Never reject them without audio evidence.
+THANK_PHRASES = (
+    'dank u wel', 'dank je wel', 'dankjewel',
+    'dank u wel voor het kijken', 'dank je wel voor het kijken',
+    'bedankt voor het kijken', 'dank u wel voor het luisteren',
+    'thank you for watching', 'thanks for watching',
+)
+
 HALLUCINATION_PHRASES = (
     'tv gelderland 2021',
-    'dank u wel',
-    'dank je wel',
-    'dankjewel',
-    'dank u wel voor het kijken',
-    'dank je wel voor het kijken',
-    'bedankt voor het kijken',
-    'dank u wel voor het luisteren',
     'ondertiteling door de amara.org gemeenschap',
     'ondertiteld door de amara.org gemeenschap',
     'ondertiteling',
@@ -69,8 +70,6 @@ HALLUCINATION_PHRASES = (
     'stilte',
     'ondertitels ingevoegd door de amara.org gemeenschap',
     'ondertiteling ingevoegd door de amara.org gemeenschap',
-    'thank you for watching',
-    'thanks for watching',
     'subtitles by the amara.org community',
 )
 
@@ -90,6 +89,7 @@ def _phrase_key(text):
     return re.sub(r'[^a-z0-9]+', ' ', text.lower()).strip()
 
 
+_THANK_KEYS = frozenset(_phrase_key(p) for p in THANK_PHRASES)
 _HALLUCINATION_KEYS = frozenset(_phrase_key(p) for p in HALLUCINATION_PHRASES)
 
 # Families rather than single strings, still whole-chunk only:
@@ -151,7 +151,7 @@ _REPEAT_RE = re.compile(r'\b(.{2,80}?)(?:\s+\1){3,}(?=\W|$)', re.IGNORECASE)
 
 def prompt_text(text):
     """Context is a hint, not an output archive. Omit suspect material."""
-    if is_hallucination(text) or _REPEAT_RE.search(text):
+    if is_hallucination(text) or _phrase_key(text) in _THANK_KEYS or _REPEAT_RE.search(text):
         return ''
     return re.sub(r'\s+', ' ', _PAUSE_RUN_RE.sub(' ', text)).strip()
 
@@ -169,23 +169,39 @@ def suspect_decode(text, duration):
 SILENT_PEAK_DBFS = -50.0
 
 
+def thanks_on_silence(text, audio):
+    """Require both low energy and a low peak; soft real thanks are not captions."""
+    return (_phrase_key(text) in _THANK_KEYS and audio is not None
+            and silent_audio(audio) and audio['peak_dbfs'] < SILENT_PEAK_DBFS)
+
+
 def transcript_discard_reason(text, audio, drop_phrases=True):
     """One acceptance gate for ordinary output and each stop-recovery window."""
-    if drop_phrases and text.strip() and is_hallucination(text):
+    if drop_phrases and text.strip() and (
+            is_hallucination(text)
+            or thanks_on_silence(text, audio)):
         return 'known_silence_artifact'
-    if text.strip() and silent_audio(audio) and (
+    # WP11: exactly two identical multiword phrases on short, near-idle audio.
+    # Zero energy alone is not speech absence: quiet real words must survive.
+    words = _phrase_key(text).split()
+    half = len(words) // 2
+    if (audio and 1 <= audio['seconds'] <= 3 and audio['voiced_s'] == 0
+            and audio['rms_dbfs'] <= -60 and 6 <= len(words) <= 12
+            and len(words) % 2 == 0 and words[:half] == words[half:]):
+        return 'silent_repeated_phrase'
+    if text.strip() and audio and silent_audio(audio) and (
             suspect_decode(text, audio['seconds'])
             or audio['peak_dbfs'] < SILENT_PEAK_DBFS):
         return 'silent_audio'
     return None
 
 
-def sanitize_transcript(text, drop_phrases=True, space_runs=True, ellipsis_style='space'):
+def sanitize_transcript(text, drop_phrases=True, space_runs=True, ellipsis_style='space', audio=None):
     """Clean one transcribed chunk before it is typed.
 
     Returns '' when the chunk should not be typed at all.
     """
-    if drop_phrases and is_hallucination(text):
+    if drop_phrases and (is_hallucination(text) or thanks_on_silence(text, audio)):
         print('[filter] Dropped silence artefact: %r' % text.strip())
         return ''
     cleaned = text
@@ -197,8 +213,21 @@ def sanitize_transcript(text, drop_phrases=True, space_runs=True, ellipsis_style
     return cleaned
 
 
-
-
+def log_cuda_oom_snapshot():
+    """One read-only, time/output-bounded diagnostic; never obscure the OOM."""
+    fields = dict(pid=os.getpid())
+    try:
+        result = subprocess.run(
+            ['nvidia-smi', '--query-compute-apps=gpu_uuid,pid,process_name,used_gpu_memory',
+             '--format=csv,noheader'],
+            capture_output=True, text=True, timeout=1, check=False)
+        fields.update(status='ok' if result.returncode == 0 else 'query_failed',
+                      returncode=result.returncode,
+                      compute_apps=result.stdout[:8192], stderr=result.stderr[:512],
+                      truncated=len(result.stdout) > 8192)
+    except Exception as exc:
+        fields.update(status='unavailable', error=type(exc).__name__)
+    diagnostic('cuda_oom_snapshot', **fields)
 
 if platform.system() == 'Windows':
     import winsound
@@ -695,12 +724,19 @@ class TranscriptionWorker:
                            vad_filter=self.vad_filter)
             if self.language:
                 options['language'] = self.language
-            segments, info = self.model.transcribe(audio_fp32, **options)
-            return ''.join(segment.text for segment in segments).lstrip()
+            try:
+                segments, info = self.model.transcribe(audio_fp32, **options)
+                return ''.join(segment.text for segment in segments).lstrip()
+            except Exception as exc:
+                message = str(exc).lower()
+                if 'cuda' in message and 'out of memory' in message:
+                    log_cuda_oom_snapshot()
+                raise
 
         duration = len(audio_fp32) / 16000
         text = decode(prompt)
-        suspect = suspect_decode(text, duration)
+        stats = audio_stats(audio_fp32)
+        suspect = suspect_decode(text, duration) or thanks_on_silence(text, stats)
         if suspect and not recovery:
             # Reset BEFORE retry: even a failed retry must break the cascade.
             self.reset_context()
@@ -727,7 +763,8 @@ class TranscriptionWorker:
         text = sanitize_transcript(text,
                                    drop_phrases=self.filter_hallucinations and not recovery,
                                    space_runs=self.space_rule_runs,
-                                   ellipsis_style=self.ellipsis_style)
+                                   ellipsis_style=self.ellipsis_style,
+                                   audio=stats)
 
         # A dropped artefact must not enter the rolling prompt either: feeding
         # 'TV Gelderland 2021' back as context makes the next chunk repeat it.
