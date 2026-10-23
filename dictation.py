@@ -59,6 +59,7 @@ HALLUCINATION_PHRASES = (
     # Subtitle sound captions (17/10: 'ZANG EN MUZIEK' on 10.5 s of silence).
     'zang',
     'zang en muziek',
+    'geluid van machines',
     'muziek en zang',
     'muziek speelt',
     'rustige muziek',
@@ -166,6 +167,17 @@ def suspect_decode(text, duration):
 
 # Peak below this on a silent range means nothing near speech level arrived.
 SILENT_PEAK_DBFS = -50.0
+
+
+def transcript_discard_reason(text, audio, drop_phrases=True):
+    """One acceptance gate for ordinary output and each stop-recovery window."""
+    if drop_phrases and text.strip() and is_hallucination(text):
+        return 'known_silence_artifact'
+    if text.strip() and silent_audio(audio) and (
+            suspect_decode(text, audio['seconds'])
+            or audio['peak_dbfs'] < SILENT_PEAK_DBFS):
+        return 'silent_audio'
+    return None
 
 
 def sanitize_transcript(text, drop_phrases=True, space_runs=True, ellipsis_style='space'):
@@ -710,6 +722,8 @@ class TranscriptionWorker:
                 print('[recovery] Unresolved suspect decode; stop ledger will check')
 
         self.last_raw = text
+        # Recovery keeps captions here so the ledger's per-window acceptance
+        # gate can log the refusal before clean_correction/joining loses it.
         text = sanitize_transcript(text,
                                    drop_phrases=self.filter_hallucinations and not recovery,
                                    space_runs=self.space_rule_runs,
@@ -1622,10 +1636,12 @@ class App():
                 text = self.transcription_worker.transcribe_chunk(merged)
                 raw = getattr(self.transcription_worker, 'last_raw', text)
                 audio = audio_stats(merged)
-                discard = None
-                if text.strip() and silent_audio(audio) and (
-                        suspect_decode(text, len(merged) / StreamingRecorder.SAMPLE_RATE)
-                        or audio['peak_dbfs'] < SILENT_PEAK_DBFS):
+                # Phrase filtering is opt-in for ordinary output, as before;
+                # recovery always rejects captions (also in clean_correction).
+                discard = transcript_discard_reason(
+                    text, audio, drop_phrases=getattr(
+                        self.transcription_worker, 'filter_hallucinations', True))
+                if discard:
                     # No 150 ms of speech energy in the whole range, and either
                     # the text is already suspect (too few words for the audio)
                     # or not one sample came near speech level: whatever Whisper
@@ -1633,7 +1649,7 @@ class App():
                     # out of the next decode's prompt. Quiet but plausible short
                     # text (peak above the floor) is still pasted.
                     print('[filter] Dropped text on silent audio: %r (%s)' % (text.strip(), audio))
-                    raw, text, discard = raw or text, '', 'silent_audio'
+                    raw, text = raw or text, ''
                     reset = getattr(self.transcription_worker, 'reset_context', None)
                     if reset:
                         reset()
@@ -1698,7 +1714,8 @@ class App():
                             return self.replayer.type_text(prefix + correction)
                         ledger.finish(
                             lambda audio: self.transcription_worker.transcribe_chunk(audio, recovery=True),
-                            deliver, is_artifact=is_hallucination)
+                            deliver, is_artifact=is_hallucination,
+                            discard_recovery=transcript_discard_reason)
                     except Exception as exc:
                         ledger.incident('stop_check_failed', error=str(exc))
                     finally:

@@ -261,7 +261,8 @@ class CoverageLedger:
 
     def finish(self, decode: Callable[[np.ndarray], str],
                deliver: Callable[[str], dict[str, Any]],
-               is_artifact: Optional[Callable[[str], bool]] = None) -> list[str]:
+               is_artifact: Optional[Callable[[str], bool]] = None,
+               discard_recovery: Optional[Callable[[str, dict[str, Any]], Optional[str]]] = None) -> list[str]:
         """Called after original delivery queue drains.
 
         Retry each suspect exactly once, in <=10s windows. Corrections are
@@ -300,7 +301,16 @@ class CoverageLedger:
                         for start in range(e['start'], e['end'], 10 * RATE):
                             end = min(start + 10 * RATE, e['end'])
                             audio = self.audio(start, end).astype(np.float32) / 32768
-                            recovered.append(clean_correction(decode(audio), is_artifact))
+                            raw = decode(audio)
+                            stats = audio_stats(audio)
+                            reason = discard_recovery(raw, stats) if discard_recovery else None
+                            if reason:
+                                # Inspect each window before joining: a caption or
+                                # silent tail must not hide inside useful speech.
+                                diagnostic('recovery_discarded', start=start, end=end,
+                                           raw=raw, discard_reason=reason, audio=stats)
+                                continue
+                            recovered.append(clean_correction(raw, is_artifact))
                     raw_text = ' '.join(t.strip() for t in recovered if t.strip())
                     text = clean_correction(raw_text, is_artifact)
                     duplicate = bool(text) and not self._failed_delivery(e) \

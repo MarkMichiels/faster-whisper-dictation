@@ -1,0 +1,45 @@
+...........F.FFFF....
+======================================================================
+FAIL: test_machine_caption_ordinary_path_also_rejected (test_silence.PipelineSilenceTests.test_machine_caption_ordinary_path_also_rejected)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/home/mark/Repositories/faster-whisper-dictation-recovery/tests/test_silence.py", line 201, in test_machine_caption_ordinary_path_also_rejected
+    self.assertFalse(any('[Correctie:' in t or t.strip() == 'GELUID VAN MACHINES'
+AssertionError: True is not false
+
+======================================================================
+FAIL: test_recovery_silent_subwindow_uses_ordinary_audio_gate (test_silence.PipelineSilenceTests.test_recovery_silent_subwindow_uses_ordinary_audio_gate)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/home/mark/Repositories/faster-whisper-dictation-recovery/tests/test_silence.py", line 183, in test_recovery_silent_subwindow_uses_ordinary_audio_gate
+    self.assertNotIn('Hallo', correction)
+AssertionError: 'Hallo' unexpectedly found in '[Correctie: in deze opname is waarschijnlijk dit gemist: "Dit zijn werkelijk nieuwe woorden uit de opname. Hallo."]'
+
+======================================================================
+FAIL: test_recovery_sound_caption_is_rejected_and_logged (test_silence.PipelineSilenceTests.test_recovery_sound_caption_is_rejected_and_logged) (caption='GELUID VAN MACHINES')
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/home/mark/Repositories/faster-whisper-dictation-recovery/tests/test_silence.py", line 168, in test_recovery_sound_caption_is_rejected_and_logged
+    self.assertFalse(any('[Correctie:' in t for t in pasted))
+AssertionError: True is not false
+
+======================================================================
+FAIL: test_recovery_sound_caption_is_rejected_and_logged (test_silence.PipelineSilenceTests.test_recovery_sound_caption_is_rejected_and_logged) (caption='ZANG EN MUZIEK')
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/home/mark/Repositories/faster-whisper-dictation-recovery/tests/test_silence.py", line 171, in test_recovery_sound_caption_is_rejected_and_logged
+    self.assertEqual(len(refused), 1)
+AssertionError: 0 != 1
+
+======================================================================
+FAIL: test_recovery_sound_caption_is_rejected_and_logged (test_silence.PipelineSilenceTests.test_recovery_sound_caption_is_rejected_and_logged) (caption='[MUZIEK]')
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/home/mark/Repositories/faster-whisper-dictation-recovery/tests/test_silence.py", line 171, in test_recovery_sound_caption_is_rejected_and_logged
+    self.assertEqual(len(refused), 1)
+AssertionError: 0 != 1
+
+----------------------------------------------------------------------
+Ran 19 tests in 0.240s
+
+FAILED (failures=5)

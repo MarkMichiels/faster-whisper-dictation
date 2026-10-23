@@ -158,6 +158,50 @@ class PipelineSilenceTests(unittest.TestCase):
         self.assertTrue(coverage.silent_audio(ledger.entries[0]['audio']))
         self.assertEqual(pasted[0], 'Ja.')
 
+    def test_recovery_sound_caption_is_rejected_and_logged(self):
+        # 22/10: empty first pass, but voice energy prevents the pre-decode
+        # silence shortcut. The stop decode must not paste a sound caption.
+        for caption in ('GELUID VAN MACHINES', 'ZANG EN MUZIEK', '[MUZIEK]'):
+            with self.subTest(caption=caption):
+                pasted, ledger, out, _ = self.run_session(
+                    [speech(9.5)], ['', '', caption])
+                self.assertFalse(any('[Correctie:' in t for t in pasted))
+                self.assertEqual(ledger.entries[0]['recovery']['text'], '')
+                refused = lines(out, 'recovery_discarded')
+                self.assertEqual(len(refused), 1)
+                self.assertEqual(refused[0]['discard_reason'], 'known_silence_artifact')
+                self.assertEqual(refused[0]['raw'], caption)
+                self.assertFalse(lines(out, 'correction_delivery'))
+
+    def test_recovery_silent_subwindow_uses_ordinary_audio_gate(self):
+        # Whole range is audible, but its second <=10s recovery window is not.
+        audio = np.concatenate([speech(10), noise(10, -70)])
+        pasted, ledger, out, _ = self.run_session([audio], [
+            '', '', 'Dit zijn werkelijk nieuwe woorden uit de opname.', 'Hallo.'])
+        correction = lines(out, 'correction_delivery')[0]['correction']
+        self.assertIn('werkelijk nieuwe woorden', correction)
+        self.assertNotIn('Hallo', correction)
+        refused = lines(out, 'recovery_discarded')[0]
+        self.assertEqual(refused['discard_reason'], 'silent_audio')
+        self.assertEqual((refused['start'], refused['end']), (10 * R, 20 * R))
+        self.assertTrue(coverage.silent_audio(refused['audio']))
+
+    def test_recovery_keeps_real_sentence_and_quiet_short_word(self):
+        for recovered in ('Het geluid van machines stoort mij.', 'Ja.'):
+            # Whole range has some speech; second window is very quiet but
+            # plausible, just like the normal-path quiet-short-word test.
+            audio = np.concatenate([speech(10), speech(2, -48)])
+            pasted, _, out, _ = self.run_session([audio], ['', '', '', recovered])
+            self.assertTrue(any(recovered.rstrip('.') in t for t in pasted))
+            self.assertFalse(lines(out, 'recovery_discarded'))
+
+    def test_machine_caption_ordinary_path_also_rejected(self):
+        pasted, ledger, _, _ = self.run_session(
+            [speech(3.5)], ['GELUID VAN MACHINES'] * 3)
+        self.assertFalse(any('[Correctie:' in t or t.strip() == 'GELUID VAN MACHINES'
+                             for t in pasted))
+        self.assertEqual(ledger.entries[0]['outcome'], 'artifact')
+
     def test_short_unknown_text_on_dead_silence_dropped(self):
         pasted, ledger, _, _ = self.run_session([noise(3.5, -70.0)], ['Hallo.'])
         self.assertEqual(pasted, [])
