@@ -1,584 +1,83 @@
-# Multilingual Dictation App based on Faster Whisper
-
-This is based on the awesome work by https://github.com/guillaumekln/faster-whisper, https://github.com/foges/whisper-dictation and various PRs in the later repo
-
-Multilingual dictation app based on the Faster Whisper to provide accurate and efficient speech-to-text conversion in any application. The app runs in the background and is triggered through a keyboard shortcut. It is also entirely offline, so no data will be shared. It allows users to set up their own keyboard combinations and choose from different Whisper models, and languages.
-
-## Quick start
-1. Run the app, switch to another application that accepts text input (editor, browser textarea, etc)
-2. Use the key combination to toggle dictation:
-
-| Action | Linux | macOS | Windows |
-|--------|-------|-------|---------|
-| **Start recording** | Double-tap `Ctrl_R` | Double-tap `Cmd_R` | `Win+Z` |
-| **Stop recording** | Single tap `Ctrl_R` | Single tap `Cmd_R` | `Win+Z` |
-| **Toggle language** | Double-tap `AltGr` | — | — |
-| **Start/stop from the mouse** | Either thumb button | Either thumb button | Either thumb button |
-
-3. Start speaking. Text appears in real-time after each natural pause (~1 second of silence).
-4. When you stop speaking for 10 seconds, the session ends automatically (double beep).
-   Or tap the key again to stop manually (single beep).
-
-With a hand already on the mouse, reaching for `Ctrl_R` costs a hand movement,
-so either thumb button (`button8`/`button9`, normally browser back/forward)
-toggles dictation as well: press once to start, press again to stop. Both
-buttons do the same thing, and two presses within 0.4s count as one, so
-hitting them together is harmless. The buttons keep their normal function
-elsewhere. Change or disable this with `--mouse-buttons`.
-
-X also delivers those presses to the focused window, where every browser-based
-app reads button 8 as "go back" — so a press to dictate navigated the app away
-from the page. `free_mouse_thumb_buttons.sh` remaps the thumb buttons onto
-buttons 10 and 11, which carry no default meaning in X, and `install.sh` runs
-it from the service before the listener starts. The listener accepts both
-pairs, so the trigger works with or without the remap.
-
-The script names no device: it remaps every physical pointer with at least
-nine buttons and builds each map from that device's own button count, so a
-machine with a different mouse, or a mouse with extra buttons, needs no edit.
-A pointer with fewer than nine buttons has no thumb buttons to free and is
-skipped, as are X's virtual core and XTEST pointers. Pass a device name or id
-to limit the run to one device.
-
-X forgets a button map when the device is re-created, so replugging the mouse
-or a USB reset after suspend would restore browser back/forward.
-`watch_mouse_thumb_buttons.sh` therefore waits on udev input-add events and
-re-applies the map; `install.sh` starts it alongside the service, and it exits
-with the service. It blocks on `udevadm monitor` rather than polling, so it
-costs nothing while idle.
-
-## Prerequisites
-
-### System packages (Linux)
-
-```bash
-sudo apt install portaudio19-dev xdotool xclip
-```
-
-- **portaudio19-dev** — required by PyAudio for microphone access
-- **xdotool** — used to detect the active window and restore focus before paste
-- **xclip** — clipboard fallback for text injection when CopyQ is not installed
-- **copyq** *(optional, recommended)* — clipboard manager; when present, every
-  dictation is also stored in clipboard history, so it is recoverable even if
-  the paste fails
-
-### System packages (macOS)
-
-```bash
-brew install portaudio
-```
-
-### NVIDIA GPU (optional, recommended)
-
-For real-time transcription with large models, a CUDA-capable GPU is strongly recommended.
-
-```bash
-# Check NVIDIA driver
-nvidia-smi
-
-# CUDA toolkit should be installed (CUDA 12.x recommended)
-nvcc --version
-```
-
-The pip packages `torch` and `ctranslate2` with CUDA support are installed via requirements.
-If you have issues, install PyTorch manually first:
-
-```bash
-pip3 install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121
-```
-
-## Permissions
-The app requires accessibility permissions to register global hotkeys and permission to access your microphone for speech recognition.
-
-For example, if you launch the app from MacOS terminal, you need to grant permission at Settings > Privacy & Security > Microphone
-and Input Monitoring
-
-![macos > settings > privacy security > microphone](macos-privacy-security-microphone.png)
-
-## Installation
-Clone the repository:
-
-```bash
-git clone https://github.com/doctorguile/faster-whisper-dictation.git
-cd faster-whisper-dictation
-```
-
-Create a virtual environment:
-
-```bash
-python3 -m venv venv
-
-source venv/bin/activate      # MacOS / Linux
-
-venv\scripts\activate.bat     # Windows cmd.exe
-```
-
-Install the required packages:
-
-```bash
-pip3 install -r requirements.txt
-```
-
-## Usage
-
-### Streaming mode (default)
-
-The default mode uses **Silero VAD** (Voice Activity Detection) to split audio into
-chunks that are transcribed and typed immediately while recording continues, so you
-see text appear during a long turn instead of only at the end.
-
-Two mechanisms split the stream:
-
-- **Main VAD** closes a clean segment once it sees a full pause (`--silence-ms`, 1s).
-- **Eager flush** handles long, steady turns that never hit a 1s pause. Once
-  `--min-chunk-s` (2.5s) of speech has accumulated, it finds the **quietest moment**
-  in the window using Silero's per-frame speech probabilities and cuts there when
-  that point is a real pause (probability ≤ `--eager-prob`, 0.35) — or, on reaching
-  the `--max-chunk-s` (10s) ceiling, cuts at the quietest point regardless. Cuts
-  always land on the best available word boundary, never mid-word, and a fluent
-  unbroken talker is never left waiting.
-
-Because eager flush hands Whisper short chunks, each next chunk is primed with a
-**rolling tail of the text transcribed so far** (`--context-chars`, 500) via
-Whisper's `initial_prompt`, so cross-chunk context (topic, names, sentence flow)
-is not lost by the splitting. The tail resets at session start and on language
-toggle.
-
-**Hold-back merge paste.** For even better accuracy the eager chunks are not
-transcribed one by one. They accumulate in a paste buffer until they total
-`--paste-min-s` (12s), then that longer audio is transcribed in a single pass
-and typed in one go — Whisper sees more context per pass, and text lands in
-fewer, larger blocks. A real ≥`--silence-ms` pause (natural sentence end) or the
-end of the turn flushes the buffer early. Nothing already typed is ever revised;
-the merge happens *before* the paste. Because a modern GPU sits idle most of the
-time on short chunks, the longer pass is effectively free. Set `--paste-min-s 0`
-to transcribe and type each chunk immediately (the old behaviour).
-
-**Silence hygiene.** Whisper was trained on subtitled video, so a chunk without
-real speech does not decode to an empty string — it decodes to the most likely
-*subtitle for silence*: `***`, a broadcaster ident, or a sign-off such as
-"Dank u wel." / "Thank you for watching." Chunk-based dictation hands the model
-many short segments, so these appeared regularly in the middle of dictated text
-(measured over 60 days on one machine: 93x `***`, 30x `TV Gelderland 2021`, 41x
-a "dank u/je wel" variant). Two defences run by default:
-
-- **Phrase filter** (`HALLUCINATION_PHRASES`), on by default: drops a chunk that
-  is *entirely* a known artefact. It runs after decoding and cannot alter a
-  single recognised word. A phrase inside a real sentence is never touched, and
-  every drop is logged as `[filter]`. Dropped text also never enters the rolling
-  context, which would otherwise prompt the next chunk to repeat it.
-- **VAD gate on transcription** (`--transcribe-vad`), off by default: removes
-  silence before the decoder sees it, killing the artefacts at the source. It
-  also shifts segment boundaries, which changed 3 of 10 blocks on noisy
-  far-field speech (neither version better), so it is opt-in — recognition
-  quality outranks removing the artefact at the source. Note that
-  `no_speech_prob` cannot serve as a gate either: with a rolling
-  `initial_prompt` set it collapses from 0.88 to 0.08 on pure silence.
-
-Dictated punctuation is also made safe for Markdown: runs of `* - _ = ~ #` are
-spaced out (`***` -> `* * *`) so they cannot render as a horizontal rule, table
-separator or heading underline, and `...` is typed per `--ellipsis-style`.
-
-```bash
-# GPU with large model (recommended for accuracy)
-python3 dictation.py -m large-v3 -v cuda -c float16 -l nl
-
-# CPU with small model (no GPU required)
-python3 dictation.py -m small -l en
-
-# More responsive (cut sooner, shorter chunks)
-python3 dictation.py -m large-v3 -v cuda -c float16 -l nl --min-chunk-s 1.5
-
-# Longer, higher-context chunks (only cut early on clearer silences)
-python3 dictation.py -m large-v3 -v cuda -c float16 -l nl --min-chunk-s 3 --max-chunk-s 12 --eager-prob 0.25
-
-# Disable eager flush (only cut on full >=1s pauses)
-python3 dictation.py -m large-v3 -v cuda -c float16 -l nl --min-chunk-s 0
-
-# No time limit (auto-stop after silence still works)
-python3 dictation.py -m large-v3 -v cuda -c float16 -l nl -t 0
-```
-
-**How it works:**
-
-```
-[Recording Thread] --> audio frames --> [VAD Thread] --> speech chunks
-                              (main VAD + eager quietest-point split)
-    --> transcription_queue --> [Transcription Thread] --> text
-    --> typing_queue --> [Typing Thread] --> keyboard output
-```
-
-1. Double-tap Right Ctrl --> beep
-2. Speak — text appears in chunks during your turn (cut at pauses / quietest points)
-3. Stop speaking for 10 seconds --> double beep (auto-stop)
-4. Or tap Right Ctrl --> single beep (manual stop)
-
-### Batch mode (original)
-
-Records all audio first, then transcribes everything at once after stopping.
-Useful as a fallback if streaming mode has issues.
-
-```bash
-python3 dictation.py -m large-v3 -v cuda -c float16 -l nl --batch-mode
-```
-
-## Options
-
-```
-python3 dictation.py [-h] [-m MODEL_NAME] [-k KEY_COMBO] [-d DOUBLE_KEY]
-                     [-t MAX_TIME] [-v DEVICE] [-c COMPUTE_TYPE]
-                     [-l LANGUAGE] [--silence-ms MS] [--min-chunk-s S]
-                     [--max-chunk-s S] [--eager-prob P] [--paste-min-s S]
-                     [--context-chars N] [--auto-stop-silence S] [--batch-mode]
-
-  -h, --help            show this help message and exit
-
-  --mouse-buttons BUTTONS
-                        Comma-separated pynput mouse buttons that toggle
-                        dictation, so a session can start without letting go of
-                        the mouse. Every listed button does the same thing:
-                        press once to start, press again to stop. Presses
-                        within 0.4s count as one, so pressing both thumb
-                        buttons together is harmless. The button keeps its
-                        normal function in other apps. Empty string disables.
-                        Default: button8,button9.
-
-  -m MODEL_NAME, --model-name MODEL_NAME
-                        Size of the model to use (tiny, tiny.en, base, base.en,
-                        small, small.en, medium, medium.en, large-v1, large-v2,
-                        large-v3, or large). Default: base.
-
-  -k KEY_COMBO, --key-combo KEY_COMBO
-                        Key combination to toggle the app.
-                        Examples: <cmd_l>+<alt>+x , <ctrl>+<alt>+a
-                        Default: <win>+z on Windows.
-
-  -d DOUBLE_KEY, --double-key DOUBLE_KEY
-                        Key for double-tap activation (macOS/Linux).
-                        Default: Right Cmd (macOS), Right Ctrl (Linux).
-
-  -t MAX_TIME, --max-time MAX_TIME
-                        Maximum recording time in seconds (safety limit).
-                        Set to 0 to disable. Default: 30.
-
-  -v DEVICE, --device DEVICE
-                        Inference device: 'cpu', 'cuda', or 'auto'.
-                        Default: cpu.
-
-  -c COMPUTE_TYPE, --compute-type COMPUTE_TYPE
-                        Compute type: 'int8', 'float16', or 'float32'.
-                        Use float16 with CUDA for best speed/accuracy.
-                        Default: int8.
-
-  -l LANGUAGE, --language LANGUAGE
-                        Force language (e.g., 'nl', 'en', 'fr', 'de').
-                        Improves accuracy for short fragments.
-                        Default: auto-detect.
-
-  --silence-ms MS       Silence duration in ms at which the main VAD closes a
-                        full segment (end of speaking). Default: 1000.
-
-  --min-chunk-s S       Eager-flush floor (streaming mode): only cut after this
-                        much speech has accumulated since the last cut. Lower =
-                        more responsive, shorter chunks. 0 disables eager flush.
-                        Default: 2.5.
-
-  --max-chunk-s S       Eager-flush ceiling (streaming mode): cut here at the
-                        latest, landing on the quietest point in the window.
-                        Higher = more context, more latency. Default: 10.
-
-  --eager-prob P        Speech-probability threshold for an early eager cut: if
-                        the quietest point in the window is at or below P it
-                        counts as a real pause and is cut early. Lower = only cut
-                        early on clearer silences. Default: 0.35.
-
-  --paste-min-s S       Hold-back paste buffer (streaming mode): accumulate eager
-                        chunks until they total S seconds, then transcribe them
-                        merged in one pass and paste at once. More context per
-                        pass = better accuracy; text lands in fewer, larger
-                        blocks. A real pause or end of turn flushes early. Never
-                        revises typed text. 0 = paste each chunk. Default: 12.
-
-  --context-chars N     Rolling tail of previously transcribed session text fed
-                        to each next chunk as initial_prompt, restoring context
-                        across eager-flush cuts. Capped at N characters; resets
-                        on session start and language toggle. 0 disables.
-                        Default: 500.
-
-  --auto-stop-silence S
-                        Automatically stop after S seconds of silence
-                        (streaming mode). Plays double beep to distinguish from
-                        manual stop. Set to 0 to disable. Default: 10.
-
-  --ellipsis-style STYLE
-                        How a dictated pause ('...') is typed: 'space' writes
-                        '. . .' so no editor or chat client can auto-format it
-                        into a dash, 'single' writes one ellipsis character,
-                        'keep' leaves it unchanged. Default: space.
-
-  --transcribe-vad      Gate the transcribe call with VAD, removing silence
-                        before decoding. Off by default: it kills the artefacts
-                        at the source but shifts segment boundaries and can
-                        change how unclear passages are recognised. Enable only
-                        if a new artefact slips past the phrase filter.
-
-  --no-hallucination-filter
-                        Disable the phrase filter for chunks that are entirely a
-                        known silence artefact.
-
-  --no-space-rule-runs  Disable spacing of character runs like '---'.
-
-  --batch-mode          Use original batch mode instead of streaming mode.
-```
-
-## Autostart on login (Linux)
-
-Run the included install script:
-
-```bash
-./install.sh
-```
-
-This installs a **systemd user service** (`spraakherkenning.service`) that starts
-dictation automatically on login. The service includes:
-
-- **Graphical-session lifecycle** — starts only when the real GNOME graphical
-  session is ready and stops at logout
-- **Duplicate prevention** — kills orphan instances before starting (`ExecStartPre`)
-- **Restart on crash** — automatic restart after 5 seconds on failure
-- **CUDA library paths** — auto-detected from the venv
-- **Session DISPLAY** — inherits `DISPLAY`/`XAUTHORITY` from the Xorg login
-  session (no hardcoded display number, so automatic login on `:0` works)
-- **Xorg required** — pynput only sees global input under Xorg; under Wayland
-  the service warns at startup. Set `WaylandEnable=false` in `/etc/gdm3/custom.conf`
-- **Revision check** — records the installed Git revision so interrupted
-  cross-machine updates can be detected and repaired
-
-> **Note:** Previous versions used a `.desktop` file in `~/.config/autostart/`.
-> This caused duplicate instances because both GNOME session and systemd's
-> `xdg-autostart-generator` would each launch a copy. The install script
-> automatically removes any legacy `.desktop` autostart.
-
-### Managing the service
-
-```bash
-systemctl --user status spraakherkenning   # Check status
-systemctl --user restart spraakherkenning  # Restart after config change
-systemctl --user stop spraakherkenning     # Stop temporarily
-journalctl --user -u spraakherkenning -f   # Follow logs
-./install.sh --check                       # Verify unit, revision and runtime
-```
-
-### Updating an existing installation
-
-After `git pull`, re-run the installer. It refreshes the unit and restarts the
-service; a separate restart is unnecessary:
-
-```bash
-cd ~/Repositories/faster-whisper-dictation
-git pull
-./install.sh
-```
-
-`./install.sh --check` is read-only. It fails when the venv or installed unit is
-missing, the installed revision is stale, the old `default.target` link still
-exists, the graphical-session link is missing, or the service is inactive.
-
-## Troubleshooting (Linux)
-
-### Dictation starts twice on login
-
-**Symptom:** Two `dictation.py` processes after login, double GPU memory usage.
-
-**Cause (historical):** Ubuntu 24.04 has multiple autostart mechanisms that can
-conflict. Specifically:
-
-1. `.desktop` files in `~/.config/autostart/` are processed by **both** GNOME
-   session and systemd's `xdg-autostart-generator`, creating two instances.
-2. A separate systemd user service (`spraakherkenning.service`) would add yet
-   another instance if both mechanisms coexisted.
-
-**Fix:** Since March 2026, `install.sh` uses a **single systemd user service** as the
-only autostart mechanism. The `ExecStartPre` directive kills any orphan instances.
-Legacy `.desktop` autostart files are removed automatically.
-
-Verify with:
-
-```bash
-# Should show exactly ONE dictation.py process
-ps aux | grep "dictation.py" | grep -v grep
-
-# Should show the service running
-systemctl --user status spraakherkenning
-```
-
-### Service is inactive immediately after login
-
-**Historical cause (fixed 2026-09-20):** the service used to be enabled for
-`default.target` while also declaring `Requires=graphical-session.target`.
-During some GNOME logins that pulled the graphical target into the early user
-manager transaction. GNOME stopped that provisional target moments later, sent
-SIGTERM to dictation, and reached the real graphical target only afterwards.
-Because the stop was clean, `Restart=on-failure` did not recover it.
-
-The service now uses `PartOf=graphical-session.target` and is enabled directly
-for that target. Re-run `./install.sh` once on every existing machine to remove
-the legacy `default.target` link and install the corrected lifecycle. Verify:
-
-```bash
-./install.sh --check
-systemctl --user status spraakherkenning
-```
-
-### Beep sounds delayed or missing
-
-**Symptom:** Start beep plays noticeably late, or doesn't play at all when
-starting and stopping quickly.
-
-**Root causes and fixes applied:**
-
-1. **Recording started after beep (fixed):** The beep used to play synchronously before
-   the recorder started, so speech during the beep was lost (visible as "..." at the start
-   of transcriptions). Now recording starts first, beep plays asynchronously.
-
-2. **sounddevice.play() global stream conflict (fixed):** `sd.play()` uses a single global
-   stream — a second `sd.play()` call kills the first sound. Now each beep gets its own
-   `OutputStream`, allowing concurrent playback.
-
-3. **500ms activation delay (fixed):** The original triple-tap detection waited 500ms after
-   double-tap to check for a third tap. Combined with ~130ms audio latency, total perceived
-   delay was 630ms+. Now double-tap fires instantly (no timer), and language toggle uses
-   a separate key (AltGr).
-
-4. **~100-150ms PipeWire latency (inherent):** Opening a PipeWire audio stream has ~50ms
-   overhead on first use. This is unavoidable without switching to direct ALSA.
-
-### Language toggles unexpectedly
-
-**Symptom:** Language switches to English/Dutch without pressing AltGr.
-
-**Cause (historical):** pynput sends a generic `Key.ctrl` event (vk=65507) alongside
-every `Key.ctrl_r` press. This generic event matched `Key.ctrl_l` because they share
-the same vk code. Fixed by filtering generic modifier events (`ctrl`, `alt`, `shift`)
-and using AltGr (unique vk=65027) instead of Ctrl_L for language toggle.
-
-### AltGr not detected
-
-**Note:** On Linux with X11, pynput reports AltGr as `KeyCode(vk=65027)`
-(ISO_Level3_Shift), not as `Key.alt_gr` (vk=65406). The code uses the actual
-vk code observed at runtime. If AltGr doesn't work on your keyboard layout,
-run the key sniffer to check:
-
-```bash
-cd ~/Repositories/faster-whisper-dictation
-source venv/bin/activate
-timeout 10 python3 -c "
-from pynput import keyboard
-def on_press(key):
-    vk = getattr(key, 'vk', None) or getattr(getattr(key, 'value', None), 'vk', None)
-    print(f'{key!r}  vk={vk}')
-with keyboard.Listener(on_press=on_press) as l: l.join()
-"
-```
-
-Then update the `lang_key = keyboard.KeyCode.from_vk(YOUR_VK)` line in `dictation.py`.
-
-## Installation on a new machine (step by step)
-
-Complete setup from scratch on Ubuntu with NVIDIA GPU:
-
-```bash
-# 1. System dependencies
-sudo apt update
-sudo apt install portaudio19-dev xdotool xclip git python3-venv
-
-# 2. Clone and setup
-cd ~/Repositories  # or wherever you keep repos
-git clone https://github.com/MarkMichiels/faster-whisper-dictation.git
-cd faster-whisper-dictation
-
-# 3. Install (creates venv, installs deps, enables systemd service)
-./install.sh
-
-# 4. (GPU only) If torch doesn't detect CUDA, reinstall with CUDA support:
-source venv/bin/activate
-pip3 install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121
-systemctl --user restart spraakherkenning
-
-# 5. Verify
-systemctl --user status spraakherkenning
-```
-
-The first run will download the Whisper model from Hugging Face (~3GB for large-v3).
-
-## Text injection (clipboard-first)
-
-Transcribed text is injected **clipboard-first for every application**: the text
-is placed on the clipboard (via CopyQ, falling back to xclip) and pasted with a
-single shortcut — `Ctrl+Shift+V` in terminals, `Ctrl+V` in GUI apps. The active
-window is detected automatically; no configuration needed.
-
-Why clipboard-first instead of character-by-character typing:
-
-- **Recoverable** — with CopyQ installed, every dictation lands in clipboard
-  history, so it is never lost even if the paste keystroke fails or focus drifts.
-- **Reliable** — one atomic paste instead of hundreds of synthetic keystrokes
-  greatly reduces dropped characters and focus-drift corruption.
-- **Works around the Kitty bug** — bypasses Kitty's XTest shift bug on AZERTY
-  keyboards (the original reason clipboard mode was added for terminals).
-
-Per-key typing via pynput remains only as a last-resort fallback when no
-clipboard tool is available; it logs how many characters failed instead of
-swallowing errors silently.
-
-### Recovering a lost dictation
-
-Every transcription is logged to the systemd journal (the service runs with
-`PYTHONUNBUFFERED=1` so entries appear immediately):
-
-```bash
-journalctl --user -u spraakherkenning -t python3 | grep '\[transcribe\]'
-```
-
-## Streaming recovery and offline tests
-
-Rolling prompts exclude pause runs, known subtitle artefacts and repetition loops.
-A suspect decode (empty/artefact, pause/repetition run, or fewer than half a word
-per second on at least eight seconds of audio) is retried **once** without a
-prompt. The old context is cleared. An unresolved result is logged; this is not
-a guarantee of complete recognition. Existing output filtering still applies.
-Retries increase latency, including on real silence. No audio archive is created.
-
-VAD schedules chunks but no longer removes captured samples between detected
-segments. Stop flushes even tails shorter than 100 ms, waits for the recorder
-and VAD writer before its sentinel, and is idempotent. A stuck audio backend can
-therefore delay stop rather than silently dropping an unfinished tail.
-
-Run pure logic/queue/sample-coverage tests without a microphone, model or desktop:
-
-```bash
-venv/bin/python -m unittest discover -s tests -v
-```
-
-Optional CPU/int8 replay against the historical baseline, with an already cached
-large-v3 model and your own 16 kHz audio file (no download or service action):
-
-```bash
-venv/bin/python tests/replay_recovery.py /tmp/speech.wav
-```
-
-The replay reports word counts and context contamination, not transcript contents.
-Automatic silence stop, device overflows, model errors and clipboard delivery
-remain separate failure modes; recovery does not make them lossless.
-
-## Replace macOS default dictation trigger key
-You can use this app to replace macOS built-in dictation. i.e. Double tap Right Cmd key to begin recording and stop recording with a single tap
-
-To use this trigger, go to System Settings -> Keyboard, disable Dictation. If you double click Right Command key on any text field, macOS will ask whether you want to enable Dictation, so select Don't Ask Again.
-
-## Setting the App as a Startup Item (macOS)
-
- 1. Open System Preferences.
- 2. Go to Users & Groups.
- 3. Click on your username, then select the Login Items tab.
- 4. Click the + button and add the `run.sh` script from the faster-whisper-dictation folder.
+# Faster Whisper desktop dictation
+
+Dictate into a desktop text field using local speech recognition. A keyboard
+trigger or mouse thumb button starts the microphone; speech is decoded in
+chunks and pasted into the window where dictation started. You do not need a
+cloud transcription account.
+
+This fork builds on [doctorguile/faster-whisper-dictation](https://github.com/doctorguile/faster-whisper-dictation),
+[faster-whisper](https://github.com/SYSTRAN/faster-whisper) and
+[foges/whisper-dictation](https://github.com/foges/whisper-dictation).
+It adds a streaming pipeline, desktop integration and bounded recovery checks.
+The original attribution and [MIT license](LICENSE) apply; retain the license
+when redistributing a source copy.
+
+## What the setup consists of
+
+- **Recognition:** Python, faster-whisper/CTranslate2 and a Whisper model;
+  the installed service selects `large-v3`, NVIDIA CUDA and `float16`.
+- **Capture and timing:** PyAudio reads the default microphone. Silero VAD
+  finds pauses; queues separate recording, decoding and text delivery.
+- **Desktop input/output:** pynput listens for triggers; X11 tools restore the
+  starting window. CopyQ stores text in history and sets the clipboard; xclip
+  is the clipboard-only fallback. A paste shortcut inserts the text.
+- **Recovery:** a RAM-only audio ledger tracks sample ranges, decode outcomes
+  and delivery receipts. At stop, suspect ranges can produce appended corrections.
+- **Lifecycle:** `install.sh` generates `spraakherkenning.service`, a systemd
+  **user** service tied to the graphical session. Mouse helper scripts prevent
+  thumb-button dictation from also navigating browser history.
+
+The reference environment is **Ubuntu + an X11/Xorg desktop + NVIDIA/CUDA**.
+That is experience with an existing installation, not proof of a clean-machine
+rebuild. The code in this snapshot includes newer recovery/filter changes that
+have offline regression coverage, not a new full desktop acceptance test.
+Windows/macOS branches exist in the code, but this fork's complete paste and
+service setup is **not validated there**. Wayland is not an equivalent target.
+CPU inference is selectable, but equal speed or desktop parity is not promised.
+
+## Read in this order
+
+1. [Rebuild and operate](docs/rebuild.md): requirements, installation, configuration,
+   daily controls and a small acceptance check.
+2. [Architecture and fork changes](docs/architecture.md): pipeline, reasons for
+   the additions, stop checks and known limits.
+3. [Privacy, offline tests and diagnosis](docs/privacy_testing.md): what remains
+   on disk, safe verification and troubleshooting.
+
+These documents travel with a source-only copy: they do not require the fork's
+Git history, local evidence files or a private setup repository. Obtain **this
+fork's agreed snapshot**, not just the upstream repository linked above.
+
+## Daily controls (Linux default)
+
+| Action | Control |
+|---|---|
+| Start | Double-tap **Right Ctrl** (within 0.3 seconds) |
+| Stop recording | Tap **Right Ctrl** once |
+| Start in the alternate language | Hold **Left Shift** while double-tapping Right Ctrl |
+| Start/stop by mouse | Press either configured thumb button |
+| Automatic stop | After about 10 seconds of detected silence |
+
+The installer selects Dutch by default; Left Shift selects English for that
+keyboard-started session only. The next unshifted keyboard start returns to the
+configured default. There is **no default AltGr language toggle**. Mouse and
+custom-combination starts use the worker's current language, so use the keyboard
+when the language choice matters.
+
+Open and focus the intended text field **before** starting. Text arrives in
+blocks, not necessarily as soon as each word is spoken. Stop ends capture, but
+queued transcription and corrections can still arrive afterwards. Corrections
+are appended, never inserted into earlier text; their labels are currently
+Dutch even in an English session.
+
+## Before installing or sharing logs
+
+`./install.sh` is not a preview: it writes/enables a service, starts or restarts
+it and remaps mouse buttons. It may install packages into a new venv and download
+a model on first service startup. Read the rebuild guide first.
+
+**Local recognition does not mean no stored text.** The app creates no audio
+archive, but CopyQ history and the systemd journal can contain the full dictation.
+In particular, `DCT-COVERAGE` JSON includes raw/filtered text and corrections.
+Review the [privacy notes](docs/privacy_testing.md#privacy-and-retention) before
+using sensitive speech or sharing diagnostics.
