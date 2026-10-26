@@ -29,12 +29,22 @@ LEGACY_DEFAULT_LINK="$SERVICE_DIR/default.target.wants/$SERVICE_NAME.service"
 REVISION="$(git -C "$SCRIPT_DIR" rev-parse --short=12 HEAD 2>/dev/null || printf 'unknown')"
 
 detect_ld_path() {
-    local cudnn_lib="$VENV_DIR/lib/python3.12/site-packages/nvidia/cudnn/lib"
-    local cublas_lib="$VENV_DIR/lib/python3.12/site-packages/nvidia/cublas/lib"
-
+    local site_packages library lib_dir
     LD_PATH=""
-    [ -d "$cudnn_lib" ] && LD_PATH="$cudnn_lib"
-    [ -d "$cublas_lib" ] && LD_PATH="${LD_PATH:+$LD_PATH:}$cublas_lib"
+    # A missing venv is normal for --check on a fresh clone. Ask the actual
+    # service interpreter, not a hardcoded Python minor version or stale glob.
+    if [ ! -x "$VENV_DIR/bin/python3" ]; then
+        return 0
+    fi
+    site_packages="$("$VENV_DIR/bin/python3" -c 'import sysconfig; print(sysconfig.get_path("purelib"))')"
+    for library in cudnn cublas; do
+        lib_dir="$site_packages/nvidia/$library/lib"
+        if [ -d "$lib_dir" ]; then
+            LD_PATH="${LD_PATH:+$LD_PATH:}$lib_dir"
+        fi
+    done
+    # Missing optional wheel directories must not trip set -e.
+    return 0
 }
 
 render_service() {
@@ -128,9 +138,8 @@ unit_is_current() {
     return 0
 }
 
-detect_ld_path
-
 if $CHECK_ONLY; then
+    detect_ld_path
     if unit_is_current; then
         echo "CURRENT: revision $REVISION is installed, enabled for the graphical session, and active"
         exit 0
@@ -156,7 +165,7 @@ else
     echo "Virtual environment already exists."
 fi
 
-# The venv may have been created above, so detect CUDA paths again.
+# Discover libraries only after a new venv and its dependencies exist.
 detect_ld_path
 
 # --- Install systemd user service ---

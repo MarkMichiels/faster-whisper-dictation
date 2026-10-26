@@ -64,7 +64,11 @@ for libraries, **not** a general network sandbox.
 Coverage includes context cleanup, one-shot prompt recovery, queue/sample-tail
 accounting, delivery failures, appended corrections, silent/caption rejection,
 quiet audible thanks, short repeated phrases, consecutive-session handling and
-bounded OOM diagnostics. Read individual tests if modifying the heuristics.
+bounded OOM diagnostics. Installer tests run a temporary source copy with a
+separate HOME and fake venv/pip/systemctl commands; they cover missing venvs,
+optional CUDA directories, Python-version-aware paths and rerun/check behavior.
+They never install packages or change the real service. Read individual tests
+if modifying the heuristics or installer.
 Passing this suite proves those cases, not real speech accuracy, CUDA library
 compatibility, desktop delivery, autostart, or performance on another GPU/CPU.
 

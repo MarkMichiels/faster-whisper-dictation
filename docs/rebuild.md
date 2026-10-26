@@ -10,9 +10,10 @@ a second machine, every keyboard/mouse, other Linux desktops, Windows and
 macOS have not been validated as an equivalent end-to-end setup. Offline unit
 tests do not establish hardware compatibility or recognition speed.
 
-Prefer Python **3.12** for reproducing the generated service: its CUDA library
-search paths explicitly contain `lib/python3.12`. Other Python versions may run
-the program, but do not automatically get those library paths.
+Python **3.12** is the reference environment. The installer asks the venv's
+`bin/python3` for its `sysconfig` package directory, so CUDA library discovery
+also follows other Python minor versions. That does not establish dependency
+compatibility with every Python version.
 
 You need:
 
@@ -115,17 +116,20 @@ return path. If one already exists, `install.sh` skips dependency installation;
 rerunning the installer does **not** upgrade its packages.
 
 Resolve the CUDA runtime prerequisites before GPU startup. The installer only
-adds existing `venv/lib/python3.12/site-packages/nvidia/cudnn/lib` and
-`nvidia/cublas/lib` directories to the unit's `LD_LIBRARY_PATH`. It neither
-creates them nor discovers arbitrary CUDA installations. If using those venv
-locations, ensure the required libraries are present there. **Installer caveat:**
-`detect_ld_path` is called before venv creation and its last directory test
-returns failure when the cuBLAS directory is absent. With `set -e`, the current
-script (including `--check`) can therefore exit silently before doing anything
-else. Do not rely on its advertised missing-venv bootstrap on an empty machine.
-Prepare/verify the Python 3.12 venv and CUDA library directories first, or have
-the maintainer correct and validate the detector. Review another layout
-explicitly rather than assuming autodetection.
+adds existing `nvidia/cudnn/lib` and `nvidia/cublas/lib` directories under the
+venv interpreter's `sysconfig.get_path("purelib")` to the unit's
+`LD_LIBRARY_PATH`, in that order. Detection runs after venv/dependency creation.
+Missing directories are allowed, including both absent; they do not abort the
+installer. The script neither installs NVIDIA runtime wheels explicitly nor
+discovers arbitrary CUDA installations. Ensure compatible libraries are present
+in those venv locations or available through the system loader before startup.
+An empty generated path is not proof that GPU inference will work.
+
+You can also let `./install.sh` create a missing venv and install requirements,
+but that route immediately proceeds to service installation and startup. Use the
+manual steps above when you need to validate dependencies and CUDA first.
+Offline regression tests cover bootstrap and generated paths using fake venv,
+pip and systemctl commands; a complete clean-machine GPU setup remains unproven.
 
 Model names are passed to `WhisperModel` without an explicit cache directory
 or model revision pin. A name such as `large-v3` can trigger a Hugging Face
@@ -147,7 +151,7 @@ Then, when ready to change the desktop setup:
 systemctl --user status spraakherkenning.service
 ```
 
-Once that initial CUDA-path detection succeeds, the installer:
+The installer:
 
 1. Removes the exact legacy `faster-whisper-dictation.desktop` autostart file.
 2. Builds a missing `venv` and installs requirements; skips an existing venv.
