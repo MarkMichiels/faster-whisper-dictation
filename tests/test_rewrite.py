@@ -925,50 +925,7 @@ if __name__ == '__main__':
 
 
 class EnglishRewriteTests(AppStart, unittest.TestCase):
-    """Left-Shift in rewrite mode: write in English, detect the spoken language."""
-
-    def detecting_worker(self, probs, outputs=('een zin',) * 4):
-        logic = app_logic()
-        obj = worker(list(outputs))
-        obj.__class__ = logic['TranscriptionWorker']
-        obj.language, obj.detect = None, ('nl', 'en')
-        obj.detected = []
-
-        def detect_language(audio):
-            obj.detected.append(len(audio))
-            if isinstance(probs, Exception):
-                raise probs
-            return max(probs, key=probs.get), max(probs.values()), list(probs.items())
-        obj.model.detect_language = detect_language
-        return obj, logic
-
-    def speech(self, seconds):
-        return np.full(int(seconds * R), 0.1, dtype=np.float32)
-
-    def test_detection_rule(self):
-        cases = [({'en': 0.9, 'nl': 0.01}, 'en'), ({'en': 0.45, 'nl': 0.005}, 'nl'),
-                 ({'nn': 0.4, 'en': 0.25, 'nl': 0.01}, 'nl'), ({'nl': 0.9, 'en': 0.05}, 'nl'),
-                 (RuntimeError('boom'), 'nl')]
-        for probs, expected in cases:
-            with self.subTest(probs=probs):
-                obj, _ = self.detecting_worker(probs)
-                out = io.StringIO()
-                with contextlib.redirect_stdout(out):
-                    obj.transcribe_chunk(self.speech(3))
-                self.assertEqual(obj.language, expected)
-                self.assertIsNone(obj.detect)
-                self.assertEqual(obj.calls[0].get('language'), expected)
-                self.assertIn('"language_detected"', out.getvalue())
-                self.assertNotIn('een zin', out.getvalue())
-
-    def test_detection_waits_for_speech(self):
-        obj, _ = self.detecting_worker({'en': 0.95, 'nl': 0.01})
-        with contextlib.redirect_stdout(io.StringIO()):
-            obj.transcribe_chunk(np.zeros(3 * R, dtype=np.float32))  # no speech: fallback, no detection
-            self.assertEqual((obj.detected, obj.calls[0].get('language'), obj.language), ([], 'nl', None))
-            obj.transcribe_chunk(self.speech(2))
-        self.assertEqual(len(obj.detected), 1)
-        self.assertEqual((obj.language, obj.calls[1].get('language')), ('en', 'en'))
+    """Left-Shift in rewrite mode: recognition stays Dutch, the rewrite is written in English."""
 
     def run_start(self, language, rewrite_mode, keys=None):
         app, events = self.start_app(config(), None)
@@ -988,29 +945,27 @@ class EnglishRewriteTests(AppStart, unittest.TestCase):
                    if line.startswith('DCT-COVERAGE ')]
         return app, session, records, bodies
 
-    def test_shift_alt_writes_english_and_detects_speech(self):
+    def test_shift_alt_recognises_dutch_writes_english(self):
         keys = {'shift': True, 'shift_held_s': 0.8, 'alt': True, 'alt_held_s': 0.6}
         app, session, records, bodies = self.run_start('en', True, keys)
         start = next(r for r in records if r['kind'] == 'session_start')
-        self.assertEqual((start['language'], start['output_language'], start['keys']), ('detect', 'en', keys))
-        self.assertEqual(session.detect, ('nl', 'en'))
-        self.assertEqual(app.transcription_worker.detect, ('nl', 'en'))
+        self.assertEqual((start['language'], start['output_language'], start['keys']), ('nl', 'en', keys))
+        self.assertEqual(app.transcription_worker.language, 'nl')
+        self.assertEqual(session.output_language, 'en')
         self.assertTrue(bodies[0]['messages'][0]['content'].startswith('Task: rewrite'))
         self.assertIn('always write the result in English', bodies[0]['messages'][0]['content'])
         outcome = next(r for r in records if r['kind'] == 'rewrite_outcome')
-        self.assertEqual(outcome['language'], 'en')
+        self.assertEqual((outcome['language'], outcome['spoken']), ('en', 'nl'))
 
     def test_alt_only_and_ordinary_shift_unchanged(self):
         app, session, records, bodies = self.run_start('nl', True, {'shift': False, 'alt': True})
         start = next(r for r in records if r['kind'] == 'session_start')
         self.assertEqual((start['language'], start['output_language']), ('nl', 'nl'))
-        self.assertIsNone(session.detect)
         self.assertIn('Belgisch-Nederlands', bodies[0]['messages'][0]['content'])
         app, session, records, bodies = self.run_start('en', False, {'shift': True, 'alt': False})
         start = next(r for r in records if r['kind'] == 'session_start')
         self.assertEqual(start['language'], 'en')  # ordinary Shift dictation: forced English, as before
         self.assertNotIn('output_language', start)
-        self.assertIsNone(session.detect)
         self.assertEqual(app.transcription_worker.language, 'en')
         self.assertEqual(bodies, [])
 

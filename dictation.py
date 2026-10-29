@@ -23,16 +23,6 @@ import rewrite
 INPUT_OVERFLOWED_ERRNO = -9981  # pyaudio.paInputOverflowed
 
 
-# Session language detection (rewrite mode in the Shift language): the
-# alternative language must reach this probability. Measured on large-v3:
-# Dutch voice notes never gave English >= 0.3 on >= 3 s of audio, accented
-# English gave >= 0.74 on 5 s.
-DETECT_MIN_P = 0.5
-# A chunk with less speech than this is decoded in the fallback language and
-# the detection waits for the next chunk.
-DETECT_MIN_VOICED_S = 1.0
-
-
 # Sentinel: distinguishes "caller passed no language" (keep current) from an
 # explicit language=None ("auto-detect this session"). Used by App.start /
 # BatchApp.start so the momentary hotkey selection sets the language every
@@ -735,11 +725,6 @@ class StreamingRecorder:
 class TranscriptionWorker:
     """Loads Whisper model once and transcribes audio chunks from a queue."""
 
-    # (fallback, alternative) while the session language is still open: detect
-    # it on the first chunk with speech, restricted to these two (rewrite mode
-    # in the Shift language). Set per session by the app.
-    detect = None
-
     def __init__(self, model_size='base', device='cpu', compute_type='int8', language=None,
                  context_chars=500, vad_filter=False, filter_hallucinations=True,
                  space_rule_runs=True, ellipsis_style='space'):
@@ -770,42 +755,14 @@ class TranscriptionWorker:
         """Forget the rolling context (new session or language switch)."""
         self._context = ''
 
-    def detect_session_language(self, audio_fp32):
-        """Fix self.language for this session from the first chunk.
-
-        Only the two candidates count. The alternative needs probability
-        >= DETECT_MIN_P and more than the fallback; otherwise (short or noisy
-        audio, an error) the fallback is used. Journal: numbers only.
-        """
-        fallback, other = self.detect
-        self.detect = None
-        audio_s = round(len(audio_fp32) / 16000, 2)
-        try:
-            _, _, probs = self.model.detect_language(audio_fp32)
-        except Exception as exc:
-            self.language = fallback
-            diagnostic('language_detected', language=fallback, reason='error',
-                       error=type(exc).__name__, audio_s=audio_s)
-            return
-        p = dict(probs)
-        scores = {fallback: round(p.get(fallback, 0.0), 3), other: round(p.get(other, 0.0), 3)}
-        chosen = other if scores[other] >= DETECT_MIN_P and scores[other] > scores[fallback] else fallback
-        self.language = chosen
-        diagnostic('language_detected', language=chosen, probabilities=scores, audio_s=audio_s)
-
     def transcribe_chunk(self, audio_fp32, recovery=False):
         """Transcribe a single audio chunk. Returns text string."""
-        if self.detect and not self.language \
-                and (audio_stats(audio_fp32) or {}).get('voiced_s', 0) >= DETECT_MIN_VOICED_S:
-            self.detect_session_language(audio_fp32)
-        # Until detection ran (a chunk without enough speech), decode in the fallback.
-        language = self.language or (self.detect[0] if self.detect else None)
         prompt = (prompt_text(self._context) or None) if self.context_chars and not recovery else None
         def decode(initial_prompt):
             options = dict(beam_size=5, initial_prompt=initial_prompt,
                            vad_filter=self.vad_filter)
-            if language:
-                options['language'] = language
+            if self.language:
+                options['language'] = self.language
             try:
                 segments, info = self.model.transcribe(audio_fp32, **options)
                 return ''.join(segment.text for segment in segments).lstrip()
@@ -1588,7 +1545,7 @@ class App():
 
         def __init__(self, transcription_queue, typing_queue, ledger=None, recorder=None,
                      previous=None, language=_UNSET, target_wid=None, rewrite=False,
-                     output_language=_UNSET, detect=None):
+                     output_language=_UNSET):
             self.transcription_queue = transcription_queue
             self.typing_queue = typing_queue
             self.ledger = ledger
@@ -1601,10 +1558,8 @@ class App():
             # active at stop (paste_wid). context lives only in this object
             # and is cleared when the session ends.
             self.rewrite = rewrite
-            # Language the rewrite is written in; by default the recognition
-            # language. detect: (fallback, alternative) for the recogniser.
+            # Language the rewrite is written in; by default the recognition language.
             self.output_language = language if output_language is _UNSET else output_language
-            self.detect = detect
             self.context = None
             self.paste_wid = None
             self.held = []
@@ -1676,10 +1631,9 @@ class App():
 
         rewrite_mode: Left-Alt was held. Without a usable configuration the
         session runs as ordinary dictation after an error tone. In rewrite
-        mode `language` is the language to write in; when that differs from
-        the configured recognition language (Left-Shift: English), the spoken
-        language is detected on the first chunk, restricted to those two, so
-        Dutch speech is recognised as Dutch and then written in English.
+        mode `language` is only the language to write in (Left-Shift:
+        English); recognition keeps the configured language (-l), so Dutch
+        speech is recognised as Dutch and the rewrite writes English.
 
         keys: modifier metadata from the hotkey listener, for the journal.
         """
@@ -1708,15 +1662,14 @@ class App():
         # Publish the new session before anything slow (recorder start, xdotool):
         # a previous session that ends meanwhile must see it is no longer the
         # current one, or it would clear `active` while this one records.
-        spoken, detect = language, None
-        default = getattr(getattr(self, 'args', None), 'language', None)
-        if rewrite_mode and language not in (_UNSET, None) and default and language != default:
-            spoken, detect = None, (default, language)
+        spoken = language
+        if rewrite_mode and language is not _UNSET:
+            spoken = getattr(getattr(self, 'args', None), 'language', None)
         session = self.Session(self.transcription_queue, self.typing_queue, self.ledger,
                                None, previous, spoken, None, rewrite=rewrite_mode,
-                               output_language=language, detect=detect)
+                               output_language=language)
         self.session = session
-        start_meta = dict(language='detect' if detect else ('unchanged' if spoken is _UNSET else spoken or 'auto'))
+        start_meta = dict(language='unchanged' if spoken is _UNSET else spoken or 'auto')
         if rewrite_mode:
             start_meta['output_language'] = None if language is _UNSET else language
         if keys:
@@ -1848,7 +1801,6 @@ class App():
             diagnostic('waited_for_previous', seconds=time.time() - t0)
         if session.language is not _UNSET:
             self.transcription_worker.language = session.language
-        self.transcription_worker.detect = getattr(session, 'detect', None)
         self.transcription_worker.reset_context()
         if session.target_wid is not None:
             self.replayer.target_wid = session.target_wid

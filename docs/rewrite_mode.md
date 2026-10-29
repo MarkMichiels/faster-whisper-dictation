@@ -18,14 +18,11 @@ The mouse thumb buttons always start ordinary dictation. Right Alt (AltGr) is
 not used. Shift and Alt may be pressed in either order; both must be held at
 the second tap.
 
-**English output from Dutch speech.** In rewrite mode Left Shift selects the
-language of the *result*, not the recognition language. When it differs from
-the configured language (`-l`), the spoken language is detected once per
-session on the first chunk with at least one second of speech, restricted to
-those two languages: the alternative (English) needs probability >= 0.5 and
-more than the configured one, otherwise the configured language is used. You
-can therefore dictate in Dutch or in English and get English text. Ordinary
-dictation with Left Shift (no Alt) still forces English recognition.
+**English output from Dutch speech.** In rewrite mode Left Shift selects only
+the language of the *result*. Recognition keeps the configured language
+(`-l`, Dutch by default), so you dictate in Dutch and the model writes the text
+in English. Ordinary dictation with Left Shift (no Alt) is unchanged: it still
+starts English recognition.
 
 Typical flow for a reply:
 
@@ -159,9 +156,9 @@ someone else's text) leave the machine for the provider. The journal never gets
 the rewritten text or the context, only metadata: `rewrite_context` (source,
 characters sent and before shortening, age, truncation, refusal reasons), `rewrite_outcome` (model,
 provider, seconds, tokens, cost, word ratio, output and spoken language, whether an email was built
-or refused) or `rewrite_failed` (reason). `session_start` records the recognition language
-(`detect` when it is detected), the output language and the Shift/Alt state at the second tap (held,
-for how long, or how long ago released); `language_detected` records the two probabilities. The
+or refused) or `rewrite_failed` (reason). `session_start` records the recognition language,
+the output language (rewrite mode) and the Shift/Alt state at the second tap (held, for how long, or
+how long ago released). The
 raw dictation is still logged by the ordinary `DCT-COVERAGE` records, as in
 ordinary dictation. CopyQ history receives both the raw and the pasted text.
 
