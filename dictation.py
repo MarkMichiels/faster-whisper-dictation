@@ -23,6 +23,16 @@ import rewrite
 INPUT_OVERFLOWED_ERRNO = -9981  # pyaudio.paInputOverflowed
 
 
+# Session language detection (rewrite mode in the Shift language): the
+# alternative language must reach this probability. Measured on large-v3:
+# Dutch voice notes never gave English >= 0.3 on >= 3 s of audio, accented
+# English gave >= 0.74 on 5 s.
+DETECT_MIN_P = 0.5
+# A chunk with less speech than this is decoded in the fallback language and
+# the detection waits for the next chunk.
+DETECT_MIN_VOICED_S = 1.0
+
+
 # Sentinel: distinguishes "caller passed no language" (keep current) from an
 # explicit language=None ("auto-detect this session"). Used by App.start /
 # BatchApp.start so the momentary hotkey selection sets the language every
@@ -725,6 +735,11 @@ class StreamingRecorder:
 class TranscriptionWorker:
     """Loads Whisper model once and transcribes audio chunks from a queue."""
 
+    # (fallback, alternative) while the session language is still open: detect
+    # it on the first chunk with speech, restricted to these two (rewrite mode
+    # in the Shift language). Set per session by the app.
+    detect = None
+
     def __init__(self, model_size='base', device='cpu', compute_type='int8', language=None,
                  context_chars=500, vad_filter=False, filter_hallucinations=True,
                  space_rule_runs=True, ellipsis_style='space'):
@@ -755,14 +770,42 @@ class TranscriptionWorker:
         """Forget the rolling context (new session or language switch)."""
         self._context = ''
 
+    def detect_session_language(self, audio_fp32):
+        """Fix self.language for this session from the first chunk.
+
+        Only the two candidates count. The alternative needs probability
+        >= DETECT_MIN_P and more than the fallback; otherwise (short or noisy
+        audio, an error) the fallback is used. Journal: numbers only.
+        """
+        fallback, other = self.detect
+        self.detect = None
+        audio_s = round(len(audio_fp32) / 16000, 2)
+        try:
+            _, _, probs = self.model.detect_language(audio_fp32)
+        except Exception as exc:
+            self.language = fallback
+            diagnostic('language_detected', language=fallback, reason='error',
+                       error=type(exc).__name__, audio_s=audio_s)
+            return
+        p = dict(probs)
+        scores = {fallback: round(p.get(fallback, 0.0), 3), other: round(p.get(other, 0.0), 3)}
+        chosen = other if scores[other] >= DETECT_MIN_P and scores[other] > scores[fallback] else fallback
+        self.language = chosen
+        diagnostic('language_detected', language=chosen, probabilities=scores, audio_s=audio_s)
+
     def transcribe_chunk(self, audio_fp32, recovery=False):
         """Transcribe a single audio chunk. Returns text string."""
+        if self.detect and not self.language \
+                and (audio_stats(audio_fp32) or {}).get('voiced_s', 0) >= DETECT_MIN_VOICED_S:
+            self.detect_session_language(audio_fp32)
+        # Until detection ran (a chunk without enough speech), decode in the fallback.
+        language = self.language or (self.detect[0] if self.detect else None)
         prompt = (prompt_text(self._context) or None) if self.context_chars and not recovery else None
         def decode(initial_prompt):
             options = dict(beam_size=5, initial_prompt=initial_prompt,
                            vad_filter=self.vad_filter)
-            if self.language:
-                options['language'] = self.language
+            if language:
+                options['language'] = language
             try:
                 segments, info = self.model.transcribe(audio_fp32, **options)
                 return ''.join(segment.text for segment in segments).lstrip()
@@ -1035,14 +1078,22 @@ class MultiTapKeyListener():
     sessions. Right-Shift is deliberately ignored (name 'shift_r').
 
     Left-Alt (momentary, no state kept): held while the double-tap fires →
-    activate_callback(language, True): rewrite mode for that session, in the
-    language chosen above. Right-Alt (AltGr, 'alt_gr'/'alt_r') is ignored.
+    rewrite mode for that session; Left-Shift then selects the language the
+    rewrite is written in (the app decides what that means for recognition).
+    Right-Alt (AltGr, 'alt_gr'/'alt_r') is ignored. With Shift already held, X
+    reports the Left-Alt key as Meta_L (its second keymap level), so Meta_L
+    counts as Left-Alt for press and release alike.
+
+    The double-tap calls activate_callback(language, rewrite, keys); keys is
+    metadata about the modifiers at that moment (held flags, how long held or
+    how long ago released), for the journal.
 
     toggle_language_callback / language_key remain for backward compatibility
     (old stateful AltGr toggle) but are unused by default.
     """
 
     TAP_WINDOW = 0.3   # max seconds between taps for double-tap
+    META_L_VK = 0xffe7  # keysym Meta_L: Left-Alt pressed or released while Shift is held
 
     def __init__(self, activate_callback, deactivate_callback,
                  toggle_language_callback=None, key=keyboard.Key.cmd_r,
@@ -1056,6 +1107,9 @@ class MultiTapKeyListener():
         self.shift_language = shift_language
         self.shift_held = False
         self.alt_held = False
+        self.alt_as_meta = False
+        # Last press / release time per modifier, for the journal only.
+        self.mod_times = {'shift': [None, None], 'alt': [None, None]}
         self.last_press_time = 0
         self.tap_count = 0
         self.lang_last_press_time = 0
@@ -1078,6 +1132,27 @@ class MultiTapKeyListener():
             return a == b
         return key == target
 
+    def _is_left_alt(self, key, name):
+        return name in ('alt', 'alt_l') or (name is None and self._get_vk(key) == self.META_L_VK)
+
+    def _mod_event(self, mod, pressed):
+        self.mod_times[mod][0 if pressed else 1] = time.time()
+
+    def keys_info(self, now=None):
+        """Modifier state at the second tap: metadata only, no key text."""
+        now = time.time() if now is None else now
+        info = {}
+        for mod, held in (('shift', self.shift_held), ('alt', self.alt_held)):
+            down, up = self.mod_times[mod]
+            info[mod] = held
+            if held and down is not None:
+                info[mod + '_held_s'] = round(now - down, 3)
+            elif up is not None:
+                info[mod + '_released_s_ago'] = round(now - up, 3)
+        if self.alt_held and self.alt_as_meta:
+            info['alt_as_meta'] = True
+        return info
+
     def on_press(self, key):
         name = getattr(key, 'name', None)
         # Track Left-Shift held state for momentary language selection. Holding
@@ -1085,11 +1160,17 @@ class MultiTapKeyListener():
         # language (English) for that session only. Left-Shift reports name
         # 'shift' (vk 65505) on X11; Right-Shift ('shift_r') is ignored.
         if name in ('shift', 'shift_l'):
+            if not self.shift_held:
+                self._mod_event('shift', True)
             self.shift_held = True
             return
         # Left-Alt arrives as the generic name 'alt' (Alt_L), so it must be
-        # tracked before the generic-modifier skip below.
-        if name in ('alt', 'alt_l'):
+        # tracked before the generic-modifier skip below; after Shift it
+        # arrives as Meta_L (no name).
+        if self._is_left_alt(key, name):
+            if not self.alt_held:
+                self._mod_event('alt', True)
+                self.alt_as_meta = name is None
             self.alt_held = True
             return
         # Skip generic modifier events (e.g. Key.ctrl vk=65507) that pynput
@@ -1110,10 +1191,7 @@ class MultiTapKeyListener():
 
             if self.tap_count == 2:
                 language = self.shift_language if self.shift_held else self.default_language
-                if self.alt_held:
-                    self.activate_callback(language, True)
-                else:
-                    self.activate_callback(language)
+                self.activate_callback(language, self.alt_held, self.keys_info(current_time))
             elif self.tap_count == 1:
                 self.deactivate_callback()
 
@@ -1134,8 +1212,12 @@ class MultiTapKeyListener():
     def on_release(self, key):
         name = getattr(key, 'name', None)
         if name in ('shift', 'shift_l'):
+            if self.shift_held:
+                self._mod_event('shift', False)
             self.shift_held = False
-        elif name in ('alt', 'alt_l'):
+        elif self._is_left_alt(key, name):
+            if self.alt_held:
+                self._mod_event('alt', False)
             self.alt_held = False
 
     def run(self):
@@ -1407,7 +1489,7 @@ class BatchApp():
     def beep(self, k, wait=True):
         playsound(self.SOUND_EFFECTS[k], wait=wait)
 
-    def start(self, language=_UNSET, rewrite_mode=False):
+    def start(self, language=_UNSET, rewrite_mode=False, keys=None):
         # Rewrite mode exists only in streaming mode; batch mode ignores it.
         if self.m.is_READY():
             if language is not _UNSET:
@@ -1505,7 +1587,8 @@ class App():
         PREVIOUS_WAIT_S = 300
 
         def __init__(self, transcription_queue, typing_queue, ledger=None, recorder=None,
-                     previous=None, language=_UNSET, target_wid=None, rewrite=False):
+                     previous=None, language=_UNSET, target_wid=None, rewrite=False,
+                     output_language=_UNSET, detect=None):
             self.transcription_queue = transcription_queue
             self.typing_queue = typing_queue
             self.ledger = ledger
@@ -1518,6 +1601,10 @@ class App():
             # active at stop (paste_wid). context lives only in this object
             # and is cleared when the session ends.
             self.rewrite = rewrite
+            # Language the rewrite is written in; by default the recognition
+            # language. detect: (fallback, alternative) for the recogniser.
+            self.output_language = language if output_language is _UNSET else output_language
+            self.detect = detect
             self.context = None
             self.paste_wid = None
             self.held = []
@@ -1578,7 +1665,7 @@ class App():
     def beep(self, k, wait=True):
         playsound(self.SOUND_EFFECTS[k], wait=wait)
 
-    def start(self, language=_UNSET, rewrite_mode=False):
+    def start(self, language=_UNSET, rewrite_mode=False, keys=None):
         """Begin a streaming dictation session.
 
         language: transcription language for THIS session, chosen at start
@@ -1588,7 +1675,13 @@ class App():
         currently configured language untouched.
 
         rewrite_mode: Left-Alt was held. Without a usable configuration the
-        session runs as ordinary dictation after an error tone.
+        session runs as ordinary dictation after an error tone. In rewrite
+        mode `language` is the language to write in; when that differs from
+        the configured recognition language (Left-Shift: English), the spoken
+        language is detected on the first chunk, restricted to those two, so
+        Dutch speech is recognised as Dutch and then written in English.
+
+        keys: modifier metadata from the hotkey listener, for the journal.
         """
         if self.active:
             return None
@@ -1615,11 +1708,21 @@ class App():
         # Publish the new session before anything slow (recorder start, xdotool):
         # a previous session that ends meanwhile must see it is no longer the
         # current one, or it would clear `active` while this one records.
+        spoken, detect = language, None
+        default = getattr(getattr(self, 'args', None), 'language', None)
+        if rewrite_mode and language not in (_UNSET, None) and default and language != default:
+            spoken, detect = None, (default, language)
         session = self.Session(self.transcription_queue, self.typing_queue, self.ledger,
-                               None, previous, language, None, rewrite=rewrite_mode)
+                               None, previous, spoken, None, rewrite=rewrite_mode,
+                               output_language=language, detect=detect)
         self.session = session
+        start_meta = dict(language='detect' if detect else ('unchanged' if spoken is _UNSET else spoken or 'auto'))
+        if rewrite_mode:
+            start_meta['output_language'] = None if language is _UNSET else language
+        if keys:
+            start_meta['keys'] = keys
         diagnostic('session_start', max_seconds=MAX_SECONDS, pcm_bytes_per_minute=RATE*2*60,
-                   rewrite=rewrite_mode)
+                   rewrite=rewrite_mode, **start_meta)
         # Create fresh recorder and start BEFORE beep so no audio is missed
         self.recorder = StreamingRecorder(
             self.transcription_queue,
@@ -1745,6 +1848,7 @@ class App():
             diagnostic('waited_for_previous', seconds=time.time() - t0)
         if session.language is not _UNSET:
             self.transcription_worker.language = session.language
+        self.transcription_worker.detect = getattr(session, 'detect', None)
         self.transcription_worker.reset_context()
         if session.target_wid is not None:
             self.replayer.target_wid = session.target_wid
@@ -1911,9 +2015,12 @@ class App():
         # Raw text first into CopyQ history, so it survives any later failure.
         history = self.replayer.add_to_history(raw)
         diagnostic('rewrite_raw_saved', copyq_add=history)
-        result = rewrite.rewrite(raw, None if session.language is _UNSET else session.language,
+        output = getattr(session, 'output_language', session.language)
+        spoken = getattr(self.transcription_worker, 'language', None)
+        result = rewrite.rewrite(raw, None if output is _UNSET else output,
                                  session.context, getattr(self, 'rewrite_config', None),
-                                 getattr(self, 'rewrite_reason', None))
+                                 getattr(self, 'rewrite_reason', None),
+                                 spoken=spoken if isinstance(spoken, str) else None)
         text = result.text
         if status:
             text = text + '\n\n' + '\n'.join(status)

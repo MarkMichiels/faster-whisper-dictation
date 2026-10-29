@@ -55,6 +55,7 @@ def key(name, vk):
 CTRL_R, CTRL = key('ctrl_r', 65508), key('ctrl', 65507)
 ALT, ALT_GR = key('alt', 65513), key('alt_gr', 65027)
 SHIFT = key('shift', 65505)
+META_L = key(None, 0xffe7)
 
 
 def llm_answer(text, field='tekst', finish='stop'):
@@ -156,8 +157,34 @@ class KeyTests(unittest.TestCase):
         self.tap_twice(listener, (SHIFT,))
         self.tap_twice(listener)  # Alt released: no rewrite remembered
         self.tap_twice(listener, (ALT_GR,))  # Right-Alt/AltGr is not the rewrite key
-        starts = [c for c in calls if c != 'stop']
-        self.assertEqual(starts, [('nl',), ('nl', True), ('en', True), ('en',), ('nl',), ('nl',)])
+        starts = [c[:2] for c in calls if c != 'stop']
+        self.assertEqual(starts, [('nl', False), ('nl', True), ('en', True), ('en', False), ('nl', False),
+                                  ('nl', False)])
+        keys = [c[2] for c in calls if c != 'stop']
+        self.assertEqual({k: v for k, v in keys[2].items() if not k.endswith('_s')},
+                         {'shift': True, 'alt': True})
+        self.assertIn('shift_held_s', keys[2])
+        self.assertIn('alt_released_s_ago', keys[3])
+
+    def test_alt_after_shift_arrives_as_meta_l(self):
+        # X reports Left-Alt as Meta_L (no pynput name) while Shift is held;
+        # measured with pynput and this keymap on a private X display.
+        cls = listener_class()
+        calls = []
+        listener = cls(lambda *a: calls.append(a), lambda: None,
+                       key=CTRL_R, default_language='nl', shift_language='en')
+        self.tap_twice(listener, (SHIFT, META_L))  # Shift first, then Alt
+        self.assertEqual(calls[-1][:2], ('en', True))
+        self.assertTrue(calls[-1][2].get('alt_as_meta'))
+        self.assertFalse(listener.alt_held)
+        # Alt first, Shift, then Alt released first: the release is Meta_L too.
+        listener.on_press(ALT)
+        listener.on_press(SHIFT)
+        listener.on_release(META_L)
+        listener.on_release(SHIFT)
+        self.assertFalse(listener.alt_held)  # never stuck in rewrite mode
+        self.tap_twice(listener)
+        self.assertEqual(calls[-1][:2], ('nl', False))
 
     def test_alt_tracked_despite_generic_skip(self):
         cls = listener_class()
@@ -433,12 +460,50 @@ class EmailTests(unittest.TestCase):
     RAW = ('ja eh dus de levering van de pompen mag vrijdag komen en de factuur volgt later '
            'groetjes Voornaam')
 
-    def run_rewrite(self, fields, cfg=None, language='nl'):
+    CONTEXT = 'Van: Bart <bart@voorbeeld.invalid>\n\nBeste,\n\nWanneer komen de pompen?\n\nGroeten,\nBart'
+
+    def run_rewrite(self, fields, cfg=None, language='nl', raw=None, context=CONTEXT):
         out = io.StringIO()
         with contextlib.redirect_stdout(out):
-            result = rewrite.rewrite(self.RAW, language, None, cfg or config(),
+            result = rewrite.rewrite(self.RAW if raw is None else raw, language, context, cfg or config(),
                                      call=lambda *a: mail_answer(fields))
         return result, out.getvalue()
+
+    ANSWER = {'mail': True, 'aanhef': 'Dag Els,', 'tekst': 'De pompen komen vrijdag.',
+              'afsluiting': 'Groetjes, Voornaam'}
+
+    def test_no_email_without_context_unless_dictated(self):
+        result, journal = self.run_rewrite(self.ANSWER, context=None)
+        # 'Dag Els,' was not dictated, 'groetjes Voornaam' was: only that stays.
+        self.assertEqual(result.text, 'De pompen komen vrijdag.\n\nGroetjes, Voornaam')
+        self.assertIn('"email": false', journal)
+        self.assertIn('"email_blocked": "no_context"', journal)
+        result, journal = self.run_rewrite(self.ANSWER, context=None,
+                                           raw='dit is een mail ' + self.RAW)
+        self.assertTrue(result.text.startswith('Dag Els,\n\n'))
+        self.assertIn('"email": true', journal)
+        self.assertNotIn('email_blocked', journal)
+
+    def test_no_email_when_context_is_not_an_email(self):
+        for context in ('Kan iemand de pompen nakijken voor vrijdag? Dat zou fijn zijn.',
+                        'Release notes 2.3: faster start-up and a smaller download size.'):
+            result, journal = self.run_rewrite(self.ANSWER, context=context)
+            self.assertIn('"email_blocked": "context_not_email"', journal)
+            self.assertFalse(result.text.startswith('Dag Els'))
+
+    def test_context_shape_of_an_email(self):
+        yes = ('Van: Jan <jan@voorbeeld.invalid>\nOnderwerp: x', 'Dear Sam,\n\nCould you send it?',
+               'Op ma 3 nov. schreef Jan:\n> tekst', 'De stalen zijn klaar.\n\nMet vriendelijke groeten,\nJan',
+               'Thanks for the quote.\n\nKind regards,\nSam', 'contact: jan@voorbeeld.invalid')
+        no = ('Kan iemand de pompen nakijken?', 'Dagelijkse controle van reactor twee om tien uur.',
+              'Beschrijving van de taak in twee zinnen. Niets meer.')
+        for text in yes:
+            self.assertTrue(rewrite.context_is_email(text), text)
+        for text in no:
+            self.assertFalse(rewrite.context_is_email(text), text)
+        self.assertIsNone(rewrite.email_block('stuur een e-mail naar Jan', None))
+        self.assertIsNone(rewrite.email_block('write an email to Sam', None))
+        self.assertEqual(rewrite.email_block('Dag Sam, de pompen komen', None), 'no_context')
 
     def test_schema_and_prompt_ask_for_email_fields(self):
         for lang, flag in (('nl', 'mail'), ('en', 'email')):
@@ -857,3 +922,101 @@ class SourceTests(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class EnglishRewriteTests(AppStart, unittest.TestCase):
+    """Left-Shift in rewrite mode: write in English, detect the spoken language."""
+
+    def detecting_worker(self, probs, outputs=('een zin',) * 4):
+        logic = app_logic()
+        obj = worker(list(outputs))
+        obj.__class__ = logic['TranscriptionWorker']
+        obj.language, obj.detect = None, ('nl', 'en')
+        obj.detected = []
+
+        def detect_language(audio):
+            obj.detected.append(len(audio))
+            if isinstance(probs, Exception):
+                raise probs
+            return max(probs, key=probs.get), max(probs.values()), list(probs.items())
+        obj.model.detect_language = detect_language
+        return obj, logic
+
+    def speech(self, seconds):
+        return np.full(int(seconds * R), 0.1, dtype=np.float32)
+
+    def test_detection_rule(self):
+        cases = [({'en': 0.9, 'nl': 0.01}, 'en'), ({'en': 0.45, 'nl': 0.005}, 'nl'),
+                 ({'nn': 0.4, 'en': 0.25, 'nl': 0.01}, 'nl'), ({'nl': 0.9, 'en': 0.05}, 'nl'),
+                 (RuntimeError('boom'), 'nl')]
+        for probs, expected in cases:
+            with self.subTest(probs=probs):
+                obj, _ = self.detecting_worker(probs)
+                out = io.StringIO()
+                with contextlib.redirect_stdout(out):
+                    obj.transcribe_chunk(self.speech(3))
+                self.assertEqual(obj.language, expected)
+                self.assertIsNone(obj.detect)
+                self.assertEqual(obj.calls[0].get('language'), expected)
+                self.assertIn('"language_detected"', out.getvalue())
+                self.assertNotIn('een zin', out.getvalue())
+
+    def test_detection_waits_for_speech(self):
+        obj, _ = self.detecting_worker({'en': 0.95, 'nl': 0.01})
+        with contextlib.redirect_stdout(io.StringIO()):
+            obj.transcribe_chunk(np.zeros(3 * R, dtype=np.float32))  # no speech: fallback, no detection
+            self.assertEqual((obj.detected, obj.calls[0].get('language'), obj.language), ([], 'nl', None))
+            obj.transcribe_chunk(self.speech(2))
+        self.assertEqual(len(obj.detected), 1)
+        self.assertEqual((obj.language, obj.calls[1].get('language')), ('en', 'en'))
+
+    def run_start(self, language, rewrite_mode, keys=None):
+        app, events = self.start_app(config(), None)
+        app.args.language = 'nl'
+        bodies = []
+
+        def http(cfg, body, timeout):
+            bodies.append(body)
+            return llm_answer('A short English text.', field='text')
+        out = io.StringIO()
+        with patch.object(rewrite, 'http_call', http), contextlib.redirect_stdout(out):
+            self.assertTrue(app.start(language, rewrite_mode, keys))
+            session = app.session
+            app.stop()
+            self.assertTrue(session.done.wait(5))
+        records = [json.loads(line.split(' ', 1)[1]) for line in out.getvalue().splitlines()
+                   if line.startswith('DCT-COVERAGE ')]
+        return app, session, records, bodies
+
+    def test_shift_alt_writes_english_and_detects_speech(self):
+        keys = {'shift': True, 'shift_held_s': 0.8, 'alt': True, 'alt_held_s': 0.6}
+        app, session, records, bodies = self.run_start('en', True, keys)
+        start = next(r for r in records if r['kind'] == 'session_start')
+        self.assertEqual((start['language'], start['output_language'], start['keys']), ('detect', 'en', keys))
+        self.assertEqual(session.detect, ('nl', 'en'))
+        self.assertEqual(app.transcription_worker.detect, ('nl', 'en'))
+        self.assertTrue(bodies[0]['messages'][0]['content'].startswith('Task: rewrite'))
+        self.assertIn('always write the result in English', bodies[0]['messages'][0]['content'])
+        outcome = next(r for r in records if r['kind'] == 'rewrite_outcome')
+        self.assertEqual(outcome['language'], 'en')
+
+    def test_alt_only_and_ordinary_shift_unchanged(self):
+        app, session, records, bodies = self.run_start('nl', True, {'shift': False, 'alt': True})
+        start = next(r for r in records if r['kind'] == 'session_start')
+        self.assertEqual((start['language'], start['output_language']), ('nl', 'nl'))
+        self.assertIsNone(session.detect)
+        self.assertIn('Belgisch-Nederlands', bodies[0]['messages'][0]['content'])
+        app, session, records, bodies = self.run_start('en', False, {'shift': True, 'alt': False})
+        start = next(r for r in records if r['kind'] == 'session_start')
+        self.assertEqual(start['language'], 'en')  # ordinary Shift dictation: forced English, as before
+        self.assertNotIn('output_language', start)
+        self.assertIsNone(session.detect)
+        self.assertEqual(app.transcription_worker.language, 'en')
+        self.assertEqual(bodies, [])
+
+    def test_primary_age_limit(self):
+        self.assertLessEqual(context_capture.PRIMARY_MAX_AGE_S, 20)
+        self.assertEqual(context_capture.judge('primary', dict(owner=True, targets=[], age_s=25),
+                                               context_capture.PRIMARY_MAX_AGE_S), 'too_old')
+        self.assertIsNone(context_capture.judge('primary', dict(owner=True, targets=[], age_s=8),
+                                                context_capture.PRIMARY_MAX_AGE_S))

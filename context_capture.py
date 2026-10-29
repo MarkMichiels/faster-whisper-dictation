@@ -30,7 +30,9 @@ import time
 from dataclasses import dataclass, field
 from typing import Any, Callable, Optional
 
-PRIMARY_MAX_AGE_S = 300
+# A selection made for a reply is seconds old when the rewrite starts (measured:
+# 3-10 s); one left over from reading something else is older (34 s, 50 s).
+PRIMARY_MAX_AGE_S = 20
 CLIPBOARD_MAX_AGE_S = 120
 DEFAULT_MAX_CHARS = 100_000
 MIN_CHARS = 20

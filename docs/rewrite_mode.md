@@ -15,7 +15,17 @@ Ordinary dictation never contacts a language model.
 | Stop | Tap Right Ctrl once, as usual (or the silence auto-stop) |
 
 The mouse thumb buttons always start ordinary dictation. Right Alt (AltGr) is
-not used.
+not used. Shift and Alt may be pressed in either order; both must be held at
+the second tap.
+
+**English output from Dutch speech.** In rewrite mode Left Shift selects the
+language of the *result*, not the recognition language. When it differs from
+the configured language (`-l`), the spoken language is detected once per
+session on the first chunk with at least one second of speech, restricted to
+those two languages: the alternative (English) needs probability >= 0.5 and
+more than the configured one, otherwise the configured language is used. You
+can therefore dictate in Dutch or in English and get English text. Ordinary
+dictation with Left Shift (no Alt) still forces English recognition.
 
 Typical flow for a reply:
 
@@ -47,9 +57,14 @@ Sounds:
 4. The answer is checked: empty, more than 1.2x or fewer than 0.15x the raw
    word count, an introduction ("Here is…"), a truncated or malformed answer all
    count as failure. Quotes or a code fence around the whole answer are removed.
-5. When the text is clearly an email (the context is an email, or the
-   dictation mentions an email or reply, or contains a greeting or sign-off),
-   it is built as a complete plain-text email: greeting, the text, sign-off and
+5. An email is built only when the dictation itself says it is one ("this
+   is an email", "mail to ..."), or when the captured context itself has the
+   shape of an email (mail headers, an address, a "... wrote:" line, a line
+   that opens with a greeting or sign-off) and the dictation answers it.
+   Without context a dictated greeting is not enough. The model judges, and a
+   check in code refuses an email outside these rules (journal:
+   `email_blocked`, then only a dictated greeting or sign-off line is kept).
+   An email is built as a complete plain-text email: greeting, the text, sign-off and
    the configured signature. A dictated greeting or sign-off is kept in its own
    words; otherwise "Beste <first name>," / "Dear <first name>," with the name
    from the dictation or the sender of the context email ("Beste," / "Hello,"
@@ -68,7 +83,9 @@ Sounds:
 
 At start the app reads, in this order:
 
-- the X11 **PRIMARY** selection, if it is at most 5 minutes old;
+- the X11 **PRIMARY** selection, if it is at most 20 seconds old (select
+  the text just before you start; an older selection is usually something
+  you read earlier, not the message you reply to);
 - else **CLIPBOARD**, if it is at most 2 minutes old and not written by CopyQ
   (after an ordinary dictation the clipboard holds your own previous text).
 
@@ -141,7 +158,10 @@ With a cloud endpoint the dictation **and the captured reply context** (often
 someone else's text) leave the machine for the provider. The journal never gets
 the rewritten text or the context, only metadata: `rewrite_context` (source,
 characters sent and before shortening, age, truncation, refusal reasons), `rewrite_outcome` (model,
-provider, seconds, tokens, cost, word ratio, whether an email was built) or `rewrite_failed` (reason). The
+provider, seconds, tokens, cost, word ratio, output and spoken language, whether an email was built
+or refused) or `rewrite_failed` (reason). `session_start` records the recognition language
+(`detect` when it is detected), the output language and the Shift/Alt state at the second tap (held,
+for how long, or how long ago released); `language_detected` records the two probabilities. The
 raw dictation is still logged by the ordinary `DCT-COVERAGE` records, as in
 ordinary dictation. CopyQ history receives both the raw and the pasted text.
 
