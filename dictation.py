@@ -1564,14 +1564,15 @@ class App():
             print('Rewrite mode: not available (%s); Left-Alt sessions dictate normally.'
                   % self.rewrite_reason)
             return
-        limit, problem = context_capture.max_chars_setting()
+        cfg = self.rewrite_config
+        limit, problem = cfg.context_max_chars, cfg.context_max_chars_invalid
         if problem:
             # The reason only, never the configured value.
-            diagnostic('rewrite_setting_invalid', setting=context_capture.MAX_CHARS_ENV,
+            diagnostic('rewrite_setting_invalid', setting=rewrite.CONTEXT_MAX_CHARS_ENV,
                        reason=problem, default=limit)
         print('Rewrite mode: model %s, time-out %gs, reply context up to %d characters%s.'
-              % (self.rewrite_config.model, self.rewrite_config.timeout_s, limit,
-                 ' (%s invalid: %s, default used)' % (context_capture.MAX_CHARS_ENV, problem)
+              % (cfg.model, cfg.timeout_s, limit,
+                 ' (%s invalid: %s, default used)' % (rewrite.CONTEXT_MAX_CHARS_ENV, problem)
                  if problem else ''))
 
     def beep(self, k, wait=True):
@@ -1636,7 +1637,7 @@ class App():
         if rewrite_mode:
             # Read once, now: after the recorder (no audio lost) and before
             # anything of this session pastes. Never read again.
-            context = context_capture.capture()
+            context = context_capture.capture(max_chars=self.rewrite_config.context_max_chars)
             session.context = context.text
             diagnostic('rewrite_context', **context.journal())
             start_sound = 'rewrite_start_context' if context.text else 'rewrite_start'

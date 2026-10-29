@@ -23,6 +23,9 @@ optional EnvironmentFile, see README):
   DICTATION_REWRITE_SIGNATURE    optional name put under the sign-off of an email
                                  (a literal \\n starts a new line); without it the
                                  sign-off line stands alone
+  DICTATION_REWRITE_CONTEXT_MAX_CHARS  most characters of reply context sent
+                                 (1000-500000, default 100000); an invalid value
+                                 keeps the default and is reported, not fatal
 """
 from __future__ import annotations
 
@@ -36,6 +39,7 @@ import urllib.request
 from dataclasses import dataclass
 from typing import Any, Callable, Optional
 
+from context_capture import DEFAULT_MAX_CHARS as DEFAULT_CONTEXT_MAX_CHARS
 from coverage_ledger import diagnostic
 
 DEFAULT_TIMEOUT_S = 30.0
@@ -44,6 +48,8 @@ LONG_WORDS = 120
 MAX_STYLE_CHARS = 2000
 MAX_TERMS_CHARS = 2000
 MAX_SIGNATURE_CHARS = 200
+CONTEXT_MAX_CHARS_ENV = 'DICTATION_REWRITE_CONTEXT_MAX_CHARS'
+CONTEXT_MAX_CHARS_RANGE = (1_000, 500_000)
 # Plausibility bounds on the answer, in words relative to the raw text.
 MIN_RATIO = 0.15
 MAX_RATIO = 1.2
@@ -117,6 +123,24 @@ class RewriteConfig:
     word_factor: float = 0.0
     provider_order: tuple = ()
     signature: str = ''
+    context_max_chars: int = DEFAULT_CONTEXT_MAX_CHARS
+    # Why a configured context limit was ignored ('not_a_number', 'out_of_range'), else None.
+    context_max_chars_invalid: Optional[str] = None
+
+
+def context_max_chars(value: Optional[str]) -> tuple[int, Optional[str]]:
+    """(limit, None), or (default, reason) for a value that is no whole number in range."""
+    value = (value or '').strip()
+    if not value:
+        return DEFAULT_CONTEXT_MAX_CHARS, None
+    try:
+        limit = int(value.replace('_', ''))
+    except ValueError:
+        return DEFAULT_CONTEXT_MAX_CHARS, 'not_a_number'
+    low, high = CONTEXT_MAX_CHARS_RANGE
+    if not low <= limit <= high:
+        return DEFAULT_CONTEXT_MAX_CHARS, 'out_of_range'
+    return limit, None
 
 
 def load_config(environ=None) -> tuple[Optional[RewriteConfig], Optional[str]]:
@@ -144,6 +168,7 @@ def load_config(environ=None) -> tuple[Optional[RewriteConfig], Optional[str]]:
     key_file = (env.get('DICTATION_REWRITE_KEY_FILE') or '').strip() or None
     if key_file and not os.access(key_file, os.R_OK):
         return None, 'key_file_unreadable'
+    limit, limit_problem = context_max_chars(env.get(CONTEXT_MAX_CHARS_ENV))
     return RewriteConfig(
         endpoint=endpoint, model=model, key_file=key_file,
         style_file=(env.get('DICTATION_REWRITE_STYLE_FILE') or '').strip() or None,
@@ -151,7 +176,8 @@ def load_config(environ=None) -> tuple[Optional[RewriteConfig], Optional[str]]:
         timeout_s=timeout, word_factor=factor,
         provider_order=tuple(p.strip() for p in (env.get('DICTATION_REWRITE_PROVIDER_ORDER') or '').split(',')
                              if p.strip()),
-        signature=_signature(env.get('DICTATION_REWRITE_SIGNATURE'))), None
+        signature=_signature(env.get('DICTATION_REWRITE_SIGNATURE')),
+        context_max_chars=limit, context_max_chars_invalid=limit_problem), None
 
 
 def _signature(value: Optional[str]) -> str:

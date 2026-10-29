@@ -347,7 +347,7 @@ class RestartTests(unittest.TestCase):
             return llm_answer('Herschreven A.')
 
         logic.update(StreamingRecorder=FakeRecorder,
-                     context_capture=types.SimpleNamespace(capture=lambda: context_capture.Context(None)))
+                     context_capture=types.SimpleNamespace(capture=lambda **kw: context_capture.Context(None)))
         app = logic['App'].__new__(logic['App'])
         app.args = types.SimpleNamespace(paste_min_s=0, silence_ms=1000, auto_stop_silence=0,
                                          min_chunk_s=1, max_chunk_s=10, eager_prob=0.5, max_time=60)
@@ -535,7 +535,7 @@ class AppStart:
             def transcribe_chunk(self, audio, recovery=False):
                 return 'gewone tekst'
 
-        def default_capture():
+        def default_capture(**kw):
             events.append(('capture',))
             return context_capture.Context(None)
         logic.update(StreamingRecorder=FakeRecorder,
@@ -716,37 +716,54 @@ class ContextTests(AppStart, unittest.TestCase):
     def test_default_limit_keeps_a_long_thread_whole(self):
         both = {'primary': self.sel(), 'clipboard': dict(owner=False)}
         thread = 'Een lange draad met vele berichten. ' * 2500  # ~90,000 characters
-        with patch.dict(os.environ, {}):
-            os.environ.pop(context_capture.MAX_CHARS_ENV, None)
-            ctx = context_capture.capture(self.fake_run(both, {'primary': thread}))
+        ctx = context_capture.capture(self.fake_run(both, {'primary': thread}))
         self.assertEqual(context_capture.DEFAULT_MAX_CHARS, 100_000)
         self.assertEqual((ctx.text, ctx.truncated), (thread.strip(), False))
-        with patch.dict(os.environ, {context_capture.MAX_CHARS_ENV: '5000'}):
-            ctx = context_capture.capture(self.fake_run(both, {'primary': thread}))
+        ctx = context_capture.capture(self.fake_run(both, {'primary': thread}), max_chars=5000)
         self.assertTrue(ctx.truncated)
         self.assertLessEqual(ctx.chars, 5000 + len('\n[ingekort]\n'))
 
     def test_limit_setting(self):
-        setting = context_capture.max_chars_setting
-        name = context_capture.MAX_CHARS_ENV
+        name = rewrite.CONTEXT_MAX_CHARS_ENV
+        base = {'DICTATION_REWRITE_ENDPOINT': ENDPOINT, 'DICTATION_REWRITE_MODEL': 'm'}
+        load = lambda value: rewrite.load_config(dict(base, **{name: value}))[0]  # noqa: E731
         default = context_capture.DEFAULT_MAX_CHARS
-        self.assertEqual(setting({}), (default, None))
-        self.assertEqual(setting({name: ' '}), (default, None))
-        self.assertEqual(setting({name: '30000'}), (30000, None))
-        self.assertEqual(setting({name: '250_000'}), (250000, None))
+        cfg = rewrite.load_config(base)[0]
+        self.assertEqual((cfg.context_max_chars, cfg.context_max_chars_invalid), (default, None))
+        for value, limit in ((' ', default), ('30000', 30000), ('250_000', 250000)):
+            with self.subTest(value=value):
+                cfg = load(value)
+                self.assertEqual((cfg.context_max_chars, cfg.context_max_chars_invalid), (limit, None))
         for value, reason in (('veel', 'not_a_number'), ('1e5', 'not_a_number'), ('12.5', 'not_a_number'),
                               ('999', 'out_of_range'), ('-5', 'out_of_range'), ('500001', 'out_of_range')):
             with self.subTest(value=value):
-                self.assertEqual(setting({name: value}), (default, reason))
+                cfg = load(value)  # an invalid limit never disables rewrite mode
+                self.assertEqual((cfg.context_max_chars, cfg.context_max_chars_invalid), (default, reason))
+
+    def test_configured_limit_reaches_capture(self):
+        seen = []
+
+        def capture(**kw):
+            seen.append(kw)
+            return context_capture.Context(None)
+        app, events = self.start_app(config(context_max_chars=30000), None, capture=capture)
+        with patch.object(rewrite, 'http_call', lambda *a: llm_answer('Een korte tekst.')), \
+                contextlib.redirect_stdout(io.StringIO()):
+            self.assertTrue(app.start('nl', True))
+            session = app.session
+            app.stop()
+            self.assertTrue(session.done.wait(5))
+        self.assertEqual(seen, [{'max_chars': 30000}])
 
     def test_invalid_limit_is_journaled_without_its_value(self):
         app = app_logic()['App'].__new__(app_logic()['App'])
-        app.rewrite_config, app.rewrite_reason = config(), None
-        name = context_capture.MAX_CHARS_ENV
+        name = rewrite.CONTEXT_MAX_CHARS_ENV
+        base = {'DICTATION_REWRITE_ENDPOINT': ENDPOINT, 'DICTATION_REWRITE_MODEL': 'fake/model'}
         for value, reason in (('geheim-12345', 'not_a_number'), ('99999999', 'out_of_range')):
             with self.subTest(reason=reason):
+                app.rewrite_config, app.rewrite_reason = rewrite.load_config(dict(base, **{name: value}))
                 out = io.StringIO()
-                with patch.dict(os.environ, {name: value}), contextlib.redirect_stdout(out):
+                with contextlib.redirect_stdout(out):
                     app._announce_rewrite()
                 lines = out.getvalue()
                 self.assertNotIn(value, lines)
@@ -755,8 +772,9 @@ class ContextTests(AppStart, unittest.TestCase):
                 self.assertEqual([(r['kind'], r['setting'], r['reason'], r['default']) for r in records],
                                  [('rewrite_setting_invalid', name, reason, 100_000)])
                 self.assertIn('up to 100000 characters (%s invalid: %s, default used)' % (name, reason), lines)
+        app.rewrite_config, app.rewrite_reason = rewrite.load_config(dict(base, **{name: '30000'}))
         out = io.StringIO()
-        with patch.dict(os.environ, {name: '30000'}), contextlib.redirect_stdout(out):
+        with contextlib.redirect_stdout(out):
             app._announce_rewrite()
         self.assertEqual(out.getvalue().strip(),
                          'Rewrite mode: model fake/model, time-out 30s, reply context up to 30000 characters.')
@@ -765,7 +783,7 @@ class ContextTests(AppStart, unittest.TestCase):
         selection = {'text': 'MAIL-BIJ-START: kunnen jullie de levering bevestigen?'}
         calls = []
 
-        def capture():
+        def capture(**kw):
             calls.append(selection['text'])
             return context_capture.Context(selection['text'], 'primary', len(selection['text']), 3.0)
         app, events = self.start_app(config(), None, capture=capture)
@@ -833,7 +851,7 @@ class SourceTests(unittest.TestCase):
             modules |= {n.module.split('.')[0] for n in ast.walk(tree)
                         if isinstance(n, ast.ImportFrom) and n.module}
             self.assertLessEqual(modules, {'__future__', 'json', 'os', 're', 'threading', 'time', 'urllib',
-                                           'dataclasses', 'typing', 'coverage_ledger', 'subprocess', 'sys',
+                                           'dataclasses', 'typing', 'coverage_ledger', 'context_capture', 'subprocess', 'sys',
                                            'select', 'Xlib'})
 
 

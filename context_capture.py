@@ -11,8 +11,8 @@ Metadata (owner, TARGETS, TIMESTAMP) is read by a short-lived helper process
 (this file with --probe, python-xlib) so a hanging owner can be killed by a hard
 time-out; the text itself is read with xclip, also with a time-out.
 
-Long text: up to DICTATION_REWRITE_CONTEXT_MAX_CHARS characters (default
-DEFAULT_MAX_CHARS) are kept. Longer text keeps its beginning and its end, with
+Long text: up to max_chars characters (default DEFAULT_MAX_CHARS; the caller
+passes the configured limit) are kept. Longer text keeps its beginning and its end, with
 TRUNCATED_MARK in between: a mail thread shows the oldest message on top, a
 quoted reply the newest, so either end can hold the message being answered.
 
@@ -33,10 +33,6 @@ from typing import Any, Callable, Optional
 PRIMARY_MAX_AGE_S = 300
 CLIPBOARD_MAX_AGE_S = 120
 DEFAULT_MAX_CHARS = 100_000
-# Accepted range for DICTATION_REWRITE_CONTEXT_MAX_CHARS; outside it, or not a
-# whole number, the default applies.
-MAX_CHARS_RANGE = (1_000, 500_000)
-MAX_CHARS_ENV = 'DICTATION_REWRITE_CONTEXT_MAX_CHARS'
 MIN_CHARS = 20
 PROBE_TIMEOUT_S = 1.5
 READ_TIMEOUT_S = 0.5
@@ -64,22 +60,6 @@ class Context:
         return dict(source=self.source, chars=self.chars, age_s=self.age_s,
                     truncated=self.truncated, original_chars=self.original_chars,
                     reasons=dict(self.reasons))
-
-
-def max_chars_setting(environ=None) -> tuple[int, Optional[str]]:
-    """(limit, None) from the environment, or (DEFAULT_MAX_CHARS, reason) when invalid."""
-    env = os.environ if environ is None else environ
-    value = (env.get(MAX_CHARS_ENV) or '').strip()
-    if not value:
-        return DEFAULT_MAX_CHARS, None
-    try:
-        limit = int(value.replace('_', ''))
-    except ValueError:
-        return DEFAULT_MAX_CHARS, 'not_a_number'
-    low, high = MAX_CHARS_RANGE
-    if not low <= limit <= high:
-        return DEFAULT_MAX_CHARS, 'out_of_range'
-    return limit, None
 
 
 def shorten(text: str, max_chars: int) -> str:
@@ -148,10 +128,8 @@ def read_text(selection: str, run: Callable = subprocess.run,
 
 def capture(run: Callable = subprocess.run,
             max_ages: tuple[float, float] = (PRIMARY_MAX_AGE_S, CLIPBOARD_MAX_AGE_S),
-            max_chars: Optional[int] = None) -> Context:
+            max_chars: int = DEFAULT_MAX_CHARS) -> Context:
     """Read the reply context once. Never raises."""
-    if max_chars is None:
-        max_chars = max_chars_setting()[0]
     reasons: dict[str, str] = {}
     meta = probe(run)
     if meta is None:
