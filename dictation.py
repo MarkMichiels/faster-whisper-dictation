@@ -18,6 +18,7 @@ from coverage_ledger import (CoverageLedger, diagnostic, MAX_SECONDS, RATE, audi
                              HELD_FOR_REWRITE)
 import context_capture
 import rewrite
+import settings
 
 # PortAudio paInputOverflowed: input samples were dropped by the driver.
 INPUT_OVERFLOWED_ERRNO = -9981  # pyaudio.paInputOverflowed
@@ -28,6 +29,13 @@ INPUT_OVERFLOWED_ERRNO = -9981  # pyaudio.paInputOverflowed
 # BatchApp.start so the momentary hotkey selection sets the language every
 # session without the combo-mode toggle() path resetting a forced -l language.
 _UNSET = object()
+
+# Set once at start by apply_settings() from config.yaml; these defaults keep
+# the behaviour without a settings file.
+SOUND_START = 'assets/granted-04.wav'
+SOUND_STOP = 'assets/beepbeep.wav'
+REWRITE_ENVIRON = None    # None: rewrite.load_config reads os.environ
+CONTEXT_MAX_AGES = None   # None: context_capture's own PRIMARY/CLIPBOARD limits
 
 # ---------------------------------------------------------------------------
 # Output hygiene: hallucination filter + horizontal-rule guard
@@ -1240,8 +1248,13 @@ class MouseToggleListener():
         return listener
 
 
-def parse_args():
+def build_parser():
     parser = argparse.ArgumentParser(description='Dictation app powered by Faster whisper')
+    parser.add_argument('--config', metavar='PATH',
+                        help='''\
+Settings file (YAML). Default: $DICTATION_CONFIG, else
+~/.config/faster-whisper-dictation/config.yaml. Every option below can also be
+set there; an option given here wins. See docs/configuration.md.''')
     parser.add_argument('-m', '--model-name', type=str, default='base',
                         help='''\
  Size of the model to use
@@ -1393,9 +1406,42 @@ are what they become once X remaps them away from browser back/forward (see
 the xinput set-button-map line in install.sh), so both pairs are listed and
 the trigger survives with or without that remap.
 Set to an empty string to disable. Default: button8,button9,button10,button11.''')
+    return parser
 
-    args = parser.parse_args()
+
+def parse_args(argv=None, environ=None):
+    """Command line on top of config.yaml (and DICTATION_REWRITE_*) on top of the code defaults."""
+    pre = argparse.ArgumentParser(add_help=False)
+    pre.add_argument('--config')
+    explicit_path = pre.parse_known_args(argv)[0].config
+    loaded = settings.load(environ, explicit_path)
+    parser = build_parser()
+    parser.set_defaults(**settings.cli_defaults(loaded))
+    args = parser.parse_args(argv)
+    # Which options were given explicitly: parse again with every default suppressed.
+    probe = build_parser()
+    for action in probe._actions:
+        action.default = argparse.SUPPRESS
+    settings.mark_cli(loaded, vars(probe.parse_args(argv)))
+    args.settings = loaded
     return args
+
+
+def apply_settings(loaded, environ=None):
+    """Settings without a CLI option go to the module and class attributes that hold them."""
+    global SOUND_START, SOUND_STOP, REWRITE_ENVIRON, CONTEXT_MAX_AGES
+    import coverage_ledger
+    MultiTapKeyListener.TAP_WINDOW = loaded.get('keys.tap_window_s')
+    MouseToggleListener.COALESCE_WINDOW = loaded.get('mouse.coalesce_s')
+    coverage_ledger.STOP_STATUS = loaded.get('output.stop_status')
+    extra = loaded.get('output.extra_terminal_classes')
+    if extra:
+        KeyboardReplayer.TERMINAL_CLASSES = KeyboardReplayer.TERMINAL_CLASSES | set(extra)
+    SOUND_START = os.path.expanduser(loaded.get('sounds.start'))
+    SOUND_STOP = os.path.expanduser(loaded.get('sounds.stop'))
+    REWRITE_ENVIRON = settings.rewrite_environ(loaded, environ)
+    CONTEXT_MAX_AGES = (loaded.get('rewrite.context.primary_max_age_s'),
+                        loaded.get('rewrite.context.clipboard_max_age_s'))
 
 
 # ---------------------------------------------------------------------------
@@ -1439,8 +1485,8 @@ class BatchApp():
         # https://freesound.org/people/leviclaassen/sounds/107786/
         # https://freesound.org/people/MATRIXXX_/
         self.SOUND_EFFECTS = {
-            "start_recording": loadwav("assets/granted-04.wav"),
-            "finish_recording": loadwav("assets/beepbeep.wav")
+            "start_recording": loadwav(SOUND_START),
+            "finish_recording": loadwav(SOUND_STOP)
         }
 
     def beep(self, k, wait=True):
@@ -1591,14 +1637,14 @@ class App():
 
         # Sound effects
         self.SOUND_EFFECTS = {
-            "start_recording": loadwav("assets/granted-04.wav"),
-            "finish_recording": loadwav("assets/beepbeep.wav")
+            "start_recording": loadwav(SOUND_START),
+            "finish_recording": loadwav(SOUND_STOP)
         }
         self.SOUND_EFFECTS.update(rewrite_sounds(self.SOUND_EFFECTS["start_recording"]))
 
         # Rewrite mode (Left-Alt + double tap). Optional; without configuration
         # the hotkey falls back to ordinary dictation with a journal line.
-        self.rewrite_config, self.rewrite_reason = rewrite.load_config()
+        self.rewrite_config, self.rewrite_reason = rewrite.load_config(REWRITE_ENVIRON)
         self._announce_rewrite()
 
     def _announce_rewrite(self):
@@ -1693,7 +1739,8 @@ class App():
         if rewrite_mode:
             # Read once, now: after the recorder (no audio lost) and before
             # anything of this session pastes. Never read again.
-            context = context_capture.capture(max_chars=self.rewrite_config.context_max_chars)
+            ages = {} if CONTEXT_MAX_AGES is None else dict(max_ages=CONTEXT_MAX_AGES)
+            context = context_capture.capture(max_chars=self.rewrite_config.context_max_chars, **ages)
             session.context = context.text
             diagnostic('rewrite_context', **context.journal())
             start_sound = 'rewrite_start_context' if context.text else 'rewrite_start'
@@ -2096,6 +2143,8 @@ def warn_if_wayland():
 if __name__ == "__main__":
     warn_if_wayland()
     args = parse_args()
+    apply_settings(args.settings)
+    settings.report(args.settings, diagnostic)
     if args.batch_mode:
         print('Using batch mode (original behaviour)')
         BatchApp(args).run()

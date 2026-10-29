@@ -94,7 +94,7 @@ token with digits), or is shorter than 20 characters. The context lives only
 in memory for that session and is cleared when the session ends.
 
 Up to 100,000 characters are sent (roughly 30,000–40,000 tokens; set
-`DICTATION_REWRITE_CONTEXT_MAX_CHARS` to change it). Longer text keeps its first
+`rewrite.context.max_chars` or `DICTATION_REWRITE_CONTEXT_MAX_CHARS` to change it). Longer text keeps its first
 and its last half of that limit with `[ingekort]` on a line in between: a mail
 thread shows the oldest message on top and the newest at the bottom, a quoted
 reply the other way round, so the message being answered can sit at either end.
@@ -104,40 +104,45 @@ grow with the context.
 
 ## Configure
 
-The service unit reads an optional environment file:
+Settings go in `~/.config/faster-whisper-dictation/config.yaml` (see
+[Configuration](configuration.md)). Example `rewrite:` section, no secrets in it:
 
-```
-EnvironmentFile=-%h/.config/faster-whisper-dictation/rewrite.env
+```yaml
+rewrite:
+  endpoint: https://openrouter.ai/api/v1/chat/completions
+  model: deepseek/deepseek-v4.1-flash
+  key_file: /path/to/a/file/holding/the/key.env
+  timeout_s: 30
+  # Optional:
+  # provider_order: [together, fireworks]
+  # style_file: /path/to/rewrite_style.md
+  # terms_file: /path/to/terms.txt
+  # word_factor: 0.45
+  # signature: Your Name
+  # context:
+  #   max_chars: 100000
+  #   primary_max_age_s: 20
+  #   clipboard_max_age_s: 120
 ```
 
-Example `~/.config/faster-whisper-dictation/rewrite.env` (no secrets in it):
-
-```
-DICTATION_REWRITE_ENDPOINT=https://openrouter.ai/api/v1/chat/completions
-DICTATION_REWRITE_MODEL=deepseek/deepseek-v4.1-flash
-DICTATION_REWRITE_KEY_FILE=/path/to/a/file/holding/the/key.env
-DICTATION_REWRITE_TIMEOUT_S=30
-# Optional:
-# DICTATION_REWRITE_PROVIDER_ORDER=together,fireworks
-# DICTATION_REWRITE_STYLE_FILE=/path/to/rewrite_style.md
-# DICTATION_REWRITE_TERMS_FILE=/path/to/terms.txt
-# DICTATION_REWRITE_WORD_FACTOR=0.45
-# DICTATION_REWRITE_SIGNATURE=Your Name
-# DICTATION_REWRITE_CONTEXT_MAX_CHARS=100000
-```
+**Older setups:** `rewrite.env` still works. The service unit reads it as an
+optional environment file (`EnvironmentFile=-%h/.config/faster-whisper-dictation/rewrite.env`);
+its `DICTATION_REWRITE_*` variables win over `config.yaml`.
+`settings.py --migrate-env` turns it into the block above. Each variable and its
+YAML key:
 
 | Variable | Meaning |
 |---|---|
-| `DICTATION_REWRITE_ENDPOINT` | Chat-completions URL; `https://`, or plain `http://` only on loopback (e.g. a local Ollama) |
-| `DICTATION_REWRITE_MODEL` | Model id |
-| `DICTATION_REWRITE_KEY_FILE` | File with the API key, as `NAME=value` or a bare line. Only the path is configured; the key is read per request and never logged |
-| `DICTATION_REWRITE_TIMEOUT_S` | Hard total time-out, 1–120 s (default 30) |
-| `DICTATION_REWRITE_PROVIDER_ORDER` | Optional OpenRouter provider preference |
-| `DICTATION_REWRITE_STYLE_FILE` | Optional few lines of preferences, sent with every request |
-| `DICTATION_REWRITE_TERMS_FILE` | Optional term list the model must spell exactly |
-| `DICTATION_REWRITE_WORD_FACTOR` | Optional: for dictations above 120 words, ask for at most factor x words (default off) |
-| `DICTATION_REWRITE_CONTEXT_MAX_CHARS` | Optional: most characters of reply context sent, 1,000–500,000 (default 100,000). An invalid value falls back to the default; the journal then gets `rewrite_setting_invalid` with the reason, never the value |
-| `DICTATION_REWRITE_SIGNATURE` | Optional name under the sign-off of an email; a literal `\n` starts a new line (max. 200 characters). Without it the sign-off line stands alone |
+| `DICTATION_REWRITE_ENDPOINT` (`rewrite.endpoint`) | Chat-completions URL; `https://`, or plain `http://` only on loopback (e.g. a local Ollama) |
+| `DICTATION_REWRITE_MODEL` (`rewrite.model`) | Model id |
+| `DICTATION_REWRITE_KEY_FILE` (`rewrite.key_file`) | File with the API key, as `NAME=value` or a bare line. Only the path is configured; the key is read per request and never logged |
+| `DICTATION_REWRITE_TIMEOUT_S` (`rewrite.timeout_s`) | Hard total time-out, 1–120 s (default 30) |
+| `DICTATION_REWRITE_PROVIDER_ORDER` (`rewrite.provider_order`) | Optional OpenRouter provider preference |
+| `DICTATION_REWRITE_STYLE_FILE` (`rewrite.style_file`) | Optional few lines of preferences, sent with every request |
+| `DICTATION_REWRITE_TERMS_FILE` (`rewrite.terms_file`) | Optional term list the model must spell exactly |
+| `DICTATION_REWRITE_WORD_FACTOR` (`rewrite.word_factor`) | Optional: for dictations above 120 words, ask for at most factor x words (default off) |
+| `DICTATION_REWRITE_CONTEXT_MAX_CHARS` (`rewrite.context.max_chars`) | Optional: most characters of reply context sent, 1,000–500,000 (default 100,000). An invalid value falls back to the default; the journal then gets `rewrite_setting_invalid` with the reason, never the value |
+| `DICTATION_REWRITE_SIGNATURE` (`rewrite.signature`) | Optional name under the sign-off of an email; a literal `\n` starts a new line (max. 200 characters). Without it the sign-off line stands alone |
 
 Every request also sends `provider: {zdr: true, data_collection: "deny",
 require_parameters: true}` (OpenRouter: only zero-data-retention endpoints, no

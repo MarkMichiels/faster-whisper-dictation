@@ -24,3 +24,5 @@ transitions
 numpy
 sounddevice; sys.platform != 'win32'
 soundfile
+# settings.py reads config.yaml (also pulled in by huggingface_hub; pinned here explicitly)
+PyYAML==6.0.3

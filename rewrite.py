@@ -7,8 +7,10 @@ returns the raw text with a reason; the caller pastes that instead.
 Journal rule: this module logs numbers and reasons only. Neither the dictated
 text, the rewritten text nor the captured context is ever printed here.
 
-Configuration comes from environment variables (the systemd unit reads an
-optional EnvironmentFile, see README):
+Configuration: load_config() takes a DICTATION_REWRITE_* mapping. The service
+builds it from the `rewrite:` section of config.yaml with real environment
+variables on top (settings.rewrite_environ; docs/configuration.md); the older
+rewrite.env EnvironmentFile still supplies such variables:
 
   DICTATION_REWRITE_ENDPOINT     chat completions URL (required)
   DICTATION_REWRITE_MODEL        model id (required)

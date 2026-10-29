@@ -26,6 +26,10 @@ VENV_DIR="$SCRIPT_DIR/venv"
 GRAPHICAL_WANTS_DIR="$SERVICE_DIR/graphical-session.target.wants"
 GRAPHICAL_LINK="$GRAPHICAL_WANTS_DIR/$SERVICE_NAME.service"
 LEGACY_DEFAULT_LINK="$SERVICE_DIR/default.target.wants/$SERVICE_NAME.service"
+# Settings live in one YAML file (docs/configuration.md). The installer creates
+# it once with its own choices below; an existing file is never touched.
+CONFIG_DIR="$HOME/.config/faster-whisper-dictation"
+CONFIG_FILE="$CONFIG_DIR/config.yaml"
 REVISION="$(git -C "$SCRIPT_DIR" rev-parse --short=12 HEAD 2>/dev/null || printf 'unknown')"
 
 detect_ld_path() {
@@ -45,6 +49,44 @@ detect_ld_path() {
     done
     # Missing optional wheel directories must not trip set -e.
     return 0
+}
+
+render_seed_config() {
+    cat << 'YAML'
+# faster-whisper-dictation settings, created once by install.sh and never
+# overwritten by it. These are the installer's choices; every other setting
+# keeps its default. All keys with their defaults: config.example.yaml in the
+# repository; reference: docs/configuration.md. Never put a secret here.
+# Apply a change with: systemctl --user restart spraakherkenning
+model:
+  name: large-v3
+  device: cuda
+  compute_type: float16
+language:
+  default: nl
+recording:
+  max_time_s: 0
+YAML
+}
+
+seed_config() {
+    # -L as well: a symlink, even a dangling one, is the user's choice.
+    if [ -e "$CONFIG_FILE" ] || [ -L "$CONFIG_FILE" ]; then
+        echo "Settings file exists, left unchanged: $CONFIG_FILE"
+        return 0
+    fi
+    mkdir -p "$CONFIG_DIR"
+    local seed
+    seed="$(mktemp "$CONFIG_DIR/.config.yaml.XXXXXX")"
+    render_seed_config > "$seed"
+    chmod 0644 "$seed"
+    # No-clobber move: a file that appeared meanwhile still wins.
+    if ! mv -n "$seed" "$CONFIG_FILE" || [ -e "$seed" ]; then
+        rm -f "$seed"
+        echo "Settings file exists, left unchanged: $CONFIG_FILE"
+        return 0
+    fi
+    echo "Created settings file: $CONFIG_FILE"
 }
 
 render_service() {
@@ -79,9 +121,13 @@ Environment=DICTATION_REVISION=$REVISION
 # from the journal (Python block-buffers stdout under systemd otherwise).
 Environment=PYTHONUNBUFFERED=1
 
-# Optional rewrite mode (Left-Alt + double tap): endpoint, model and the path of
-# a key file live outside the repository. The leading '-' keeps the service
-# starting when the file does not exist; dictation then works as before.
+# Settings: model, language and every other option come from this YAML file
+# (created once by install.sh). Command-line options would override it.
+Environment=DICTATION_CONFIG=%h/.config/faster-whisper-dictation/config.yaml
+
+# Older route for the rewrite mode, still supported: DICTATION_REWRITE_*
+# variables. They win over config.yaml. The leading '-' keeps the service
+# starting when the file does not exist.
 EnvironmentFile=-%h/.config/faster-whisper-dictation/rewrite.env
 
 # No pattern-based pre-kill: systemd owns the lifecycle and stops every
@@ -98,7 +144,7 @@ ExecStartPre=-$SCRIPT_DIR/free_mouse_thumb_buttons.sh
 # on every udev input-add event and exits with the service.
 ExecStartPost=-/bin/bash -c '$SCRIPT_DIR/watch_mouse_thumb_buttons.sh &'
 
-ExecStart=$VENV_DIR/bin/python3 dictation.py -m large-v3 -v cuda -c float16 -l nl -t 0
+ExecStart=$VENV_DIR/bin/python3 dictation.py
 
 Restart=on-failure
 RestartSec=5
@@ -126,6 +172,13 @@ unit_is_current() {
         return 1
     fi
     rm -f "$expected_unit"
+
+    # Without its settings file the flagless unit would run the code defaults
+    # (base model on CPU, language auto-detect): rerun install.sh to create it.
+    if [ ! -e "$CONFIG_FILE" ]; then
+        echo "NOT CURRENT: settings file is missing: $CONFIG_FILE" >&2
+        return 1
+    fi
 
     if [ ! -L "$GRAPHICAL_LINK" ] || [ "$(readlink -f "$GRAPHICAL_LINK")" != "$SERVICE_FILE" ]; then
         echo "NOT CURRENT: service is not enabled for graphical-session.target" >&2
@@ -173,6 +226,10 @@ fi
 # Discover libraries only after a new venv and its dependencies exist.
 detect_ld_path
 
+# --- Settings file (once; never overwritten) ---
+# Before the unit: the flagless service must find its settings at first start.
+seed_config
+
 # --- Install systemd user service ---
 mkdir -p "$SERVICE_DIR"
 rendered_unit="$(mktemp)"
@@ -208,6 +265,7 @@ fi
 echo ""
 echo "Done. Dictation will autostart on login via systemd."
 echo "Installed revision: $REVISION"
+echo "Settings: $CONFIG_FILE (reference: docs/configuration.md)"
 echo ""
 echo "Useful commands:"
 echo "  systemctl --user status $SERVICE_NAME   # Check status"

@@ -16,7 +16,7 @@ when redistributing a source copy.
 ## What the setup consists of
 
 - **Recognition:** Python, faster-whisper/CTranslate2 and a Whisper model;
-  the installed service selects `large-v3`, NVIDIA CUDA and `float16`.
+  the installer's settings file selects `large-v3`, NVIDIA CUDA and `float16`.
 - **Capture and timing:** PyAudio reads the default microphone. Silero VAD
   finds pauses; queues separate recording, decoding and text delivery.
 - **Desktop input/output:** pynput listens for triggers; X11 tools restore the
@@ -44,7 +44,9 @@ CPU inference is selectable, but equal speed or desktop parity is not promised.
    the additions, stop checks and known limits.
 3. [Privacy, offline tests and diagnosis](docs/privacy_testing.md): what remains
    on disk, safe verification and troubleshooting.
-4. [Rewrite mode](docs/rewrite_mode.md): optional rewriting of one dictation into
+4. [Configuration](docs/configuration.md): the one settings file
+   (`config.yaml`), precedence, journal lines and every key with its default.
+5. [Rewrite mode](docs/rewrite_mode.md): optional rewriting of one dictation into
    concise written text by a configured language model (cloud or local).
 
 These documents travel with a source-only copy: they do not require the fork's
@@ -62,7 +64,7 @@ fork's agreed snapshot**, not just the upstream repository linked above.
 | Start/stop by mouse | Press either configured thumb button |
 | Automatic stop | After about 10 seconds of detected silence |
 
-The installer selects Dutch by default; Left Shift selects English for that
+The settings file that the installer creates selects Dutch (`language.default: nl`); Left Shift selects English for that
 keyboard-started session only. The next unshifted keyboard start returns to the
 configured default. There is **no default AltGr language toggle**. Mouse and
 custom-combination starts use the worker's current language, so use the keyboard

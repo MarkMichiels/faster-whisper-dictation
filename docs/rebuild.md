@@ -158,9 +158,13 @@ The installer:
 3. Overwrites `~/.config/systemd/user/spraakherkenning.service`.
 4. Removes the legacy `default.target` enablement link and enables the unit for
    `graphical-session.target`; `PartOf` links stopping to graphical logout.
-5. Reloads systemd and **starts or restarts** the service. The generated command
-   is `venv/bin/python3 dictation.py -m large-v3 -v cuda -c float16 -l nl -t 0`.
-6. Runs mouse remapping before the process, and starts its device-add watcher.
+5. Creates `~/.config/faster-whisper-dictation/config.yaml` **once** with the
+   installer's profile (`large-v3`, `cuda`, `float16`, language `nl`, no short
+   recording limit); an existing file is never overwritten.
+6. Reloads systemd and **starts or restarts** the service. The generated command
+   is `venv/bin/python3 dictation.py` without options: the settings come from
+   that file (`DICTATION_CONFIG` in the unit). See [Configuration](configuration.md).
+7. Runs mouse remapping before the process, and starts its device-add watcher.
 
 The unit uses `Restart=on-failure` with a five-second delay, `Nice=10` and
 `OOMScoreAdjust=200`. There is no pattern-based orphan-process kill or global
@@ -168,7 +172,8 @@ singleton lock. Keep only one launcher enabled; systemd manages its own cgroup,
 not unrelated manually started processes.
 
 `--check` compares the generated unit (including source revision and detected
-library paths), venv executable, enablement links and active status. It creates
+library paths), venv executable, the presence of `config.yaml`, enablement
+links and active status. It creates
 and removes a temporary comparison file, but does not install or restart
 anything. `CURRENT` is **not** a microphone, GPU decode, CopyQ, mouse-map or
 application-paste acceptance test.
@@ -179,8 +184,8 @@ Use this only instead of the service. After stopping an existing service and
 confirming there is no separate instance, run from the source directory:
 
 ```sh
-# GPU profile equivalent to the service
-venv/bin/python3 dictation.py -m large-v3 -v cuda -c float16 -l nl -t 0
+# Same settings as the service (reads ~/.config/faster-whisper-dictation/config.yaml)
+venv/bin/python3 dictation.py
 
 # Alternative: CPU profile (not the installer's profile, speed not equivalent)
 venv/bin/python3 dictation.py -m small -v cpu -c int8 -l en
@@ -189,15 +194,18 @@ venv/bin/python3 dictation.py -m small -v cpu -c int8 -l en
 Run **one**, not both. The Python application needs the same working runtime
 library paths as the service if your CUDA libraries are in the venv. The Python
 command does not run the mouse remap/watcher automatically. `start_dictation.sh`
-prefers an enabled service, otherwise uses the fixed GPU/Dutch profile and a
-fallback `DISPLAY=:1`; it is not a portable CPU launcher. `run.sh` is not a
+prefers an enabled service, otherwise starts the app with the settings file and
+a fallback `DISPLAY=:1`; it is not a portable CPU launcher. `run.sh` is not a
 second autostart mechanism to enable beside systemd.
 
 ## Configure the application
 
-Configuration is command-line based; there is no YAML settings file. Defaults
-below are those of direct Python invocation, not necessarily the service.
-Quote hotkey strings so the shell does not interpret angle brackets.
+Every option below can also be set in the settings file
+`~/.config/faster-whisper-dictation/config.yaml`; an option given on the command
+line wins. The file, its keys, precedence and journal lines are described in
+[Configuration](configuration.md). Defaults below are those of the code, used
+when neither the file nor the command line sets a value. Quote hotkey strings so
+the shell does not interpret angle brackets.
 
 | Option | Default | Meaning |
 |---|---|---|
@@ -224,12 +232,13 @@ Quote hotkey strings so the shell does not interpret angle brackets.
 | `--ellipsis-style` | `space` | `space`, `single` or `keep` |
 | `--batch-mode` | off | Legacy record-then-decode path, without the streaming ledger/stop check |
 
-For service changes, edit the tracked `ExecStart` template in `install.sh` and
-regenerate the unit, or maintain an explicit systemd override. A rerun overwrites
+For service changes, prefer `config.yaml` and a restart. Unit changes go in the
+tracked template in `install.sh` (regenerate the unit), or in an explicit systemd
+override. A rerun overwrites
 direct edits to the generated unit. Overrides are outside `--check`'s comparison
 of the generated file; inspect `systemctl --user cat spraakherkenning.service`
-for the effective configuration. No CLI option translates the Dutch recovery
-labels or controls `STOP_STATUS`; the latter is a constant in `coverage_ledger.py`.
+for the effective configuration. Nothing translates the Dutch recovery labels;
+the stop status line is `output.stop_status` in the settings file.
 
 ## Operate and verify
 
@@ -267,3 +276,9 @@ The stop sound is **not** completion of transcription or recovery. Let finishing
 work drain before stopping/restarting the service; service shutdown or Ctrl+C
 is not a guaranteed graceful recovery flush. Preserve existing code/environment
 and unit backups until this acceptance check succeeds.
+
+Files outside the repository that a rebuild needs and the repository cannot
+restore: `~/.config/faster-whisper-dictation/config.yaml` (your settings; the
+installer only recreates its own profile), an older `rewrite.env` if you still use
+one, and the rewrite key file with any style or term files its paths point to.
+Back them up yourself; keep the key file private (`chmod 600`).

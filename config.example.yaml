@@ -1,0 +1,66 @@
+# faster-whisper-dictation settings.
+# Copy to ~/.config/faster-whisper-dictation/config.yaml and uncomment what you change.
+# Every value shown is the default. Reference: docs/configuration.md
+# Precedence: command line > DICTATION_REWRITE_* environment > this file > default.
+# Never put a secret here: rewrite.key_file is the path of the file holding the key.
+# A change takes effect after: systemctl --user restart spraakherkenning
+
+model:
+  # name: base    # Whisper model: tiny ... large-v3, or a CTranslate2 model path or ID.
+  # device: cpu    # Inference device: cpu, cuda or auto.
+  # compute_type: int8    # Precision: int8, float16 or float32.
+
+language:
+  # default: null    # Recognition language, e.g. nl; null = auto-detect.
+  # shift: en    # Language for a session started with Left-Shift held.
+
+keys:
+  # double_key: null    # Key to double-tap; null = <ctrl_r> on Linux, <cmd_r> on macOS.
+  # key_combo: null    # Key combination that toggles instead, e.g. <ctrl>+<alt>+a; null = <win>+z on Windows.
+  # tap_window_s: 0.3    # Most seconds between the two taps of a double tap.
+
+mouse:
+  # buttons: [button8, button9, button10, button11]    # pynput mouse buttons that toggle dictation; [] disables.
+  # coalesce_s: 0.4    # Presses within this many seconds count as one.
+
+recording:
+  # max_time_s: 30    # Recording limit in seconds; 0 = only the 30-minute session cap.
+  # auto_stop_silence_s: 10    # Stop after this many seconds of silence; 0 = never.
+  # batch_mode: false    # Original batch mode instead of streaming.
+
+streaming:
+  # silence_ms: 1000    # Pause in milliseconds that ends a speech chunk.
+  # min_chunk_s: 2.5    # Eager-flush floor in seconds; 0 disables eager flushing.
+  # max_chunk_s: 10    # Eager-flush ceiling in seconds.
+  # eager_prob: 0.35    # Speech probability at or below which a pause is cut early.
+  # paste_min_s: 12.0    # Seconds of audio merged before one paste; 0 = per chunk.
+  # context_chars: 500    # Characters of earlier text given to Whisper as prompt; 0 = off.
+
+transcription:
+  # vad_filter: false    # Gate decoding with VAD (off: the phrase filter is used).
+
+output:
+  # hallucination_filter: true    # Drop chunks that are only a known silence artefact.
+  # space_rule_runs: true    # Type '***' as '* * *' so it never renders as Markdown.
+  # ellipsis_style: space    # How '...' is typed: space, single or keep.
+  # stop_status: true    # Paste a [Controle: ...] line after a session with a correction.
+  # extra_terminal_classes: []    # Extra window classes that paste with Ctrl+Shift+V (added to the built-in list).
+
+sounds:
+  # start: assets/granted-04.wav    # Start sound (WAV); relative to the working directory.
+  # stop: assets/beepbeep.wav    # Stop sound (WAV); relative to the working directory.
+
+rewrite:
+  # endpoint: null    # Chat completions URL, https (or loopback); rewrite mode needs it.
+  # model: null    # Model id; rewrite mode needs it.
+  # key_file: null    # Path of the file holding the API key; never the key itself.
+  # style_file: null    # Path of a short preferences file sent with every call.
+  # terms_file: null    # Path of a term list, one term per line.
+  # timeout_s: 30    # Hard total time-out in seconds.
+  # word_factor: 0    # Word maximum for long dictations as factor x words; 0 = off.
+  # provider_order: []    # OpenRouter provider preference, e.g. [together, fireworks].
+  # signature: ""    # Name under the sign-off of an email; may span lines.
+  context:
+    # max_chars: 100000    # Most characters of reply context sent.
+    # primary_max_age_s: 20    # Oldest highlighted text (PRIMARY) used as context.
+    # clipboard_max_age_s: 120    # Oldest clipboard text used as context.

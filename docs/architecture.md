@@ -38,9 +38,10 @@ recognition, this source adds:
 |---|---|
 | `dictation.py` | CLI; normal and batch apps; audio/VAD threads; model worker; triggers; clipboard and focus handling |
 | `coverage_ledger.py` | RAM samples, contiguous outcome ranges, numeric audio statistics, bounded stop recovery, corrections and JSON diagnostics |
-| `rewrite.py` | Optional rewrite mode: configuration from the environment, prompt, one chat-completions call (stdlib), answer check and raw-text fallback |
+| `settings.py` | One settings file (`config.yaml`): schema with defaults, validation, precedence (CLI > `DICTATION_REWRITE_*` > YAML > code), journal of sources without values, `rewrite.env` migration; see [Configuration](configuration.md) |
+| `rewrite.py` | Optional rewrite mode: configuration from the merged settings, prompt, one chat-completions call (stdlib), answer check and raw-text fallback |
 | `context_capture.py` | Optional rewrite mode: one-time PRIMARY/CLIPBOARD reply-context capture with age, origin and secret checks |
-| `install.sh` | Render/install/check the systemd user unit; fixed GPU/Dutch launch profile; optional rewrite environment file |
+| `install.sh` | Render/install/check the systemd user unit; creates `config.yaml` once with a GPU/Dutch profile, never overwrites it; optional rewrite environment file |
 | `free_mouse_thumb_buttons.sh` | Map buttons 8/9 to 10/11 on suitable physical X pointers |
 | `watch_mouse_thumb_buttons.sh` | Reapply maps at startup and after udev input-add events |
 | `start_dictation.sh`, `run.sh` | Legacy/manual launch helpers; not required alongside the managed service |

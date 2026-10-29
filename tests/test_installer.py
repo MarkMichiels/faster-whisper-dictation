@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 import shlex
 import subprocess
+import sys
 import tempfile
 import unittest
 
@@ -113,6 +114,43 @@ fi
                                      capture_output=True, text=True, timeout=15)
             self.assertEqual(checked.returncode, 0, checked.stderr)
             self.assertIn("CURRENT: revision", checked.stdout)
+
+            # The unit starts without flags and points at the settings file.
+            self.assertIn(f"ExecStart={script.parent}/venv/bin/python3 dictation.py\n", unit)
+            self.assertIn("Environment=DICTATION_CONFIG=%h/.config/faster-whisper-dictation/config.yaml\n", unit)
+            self.assertIn("EnvironmentFile=-%h/.config/faster-whisper-dictation/rewrite.env\n", unit)
+            # The settings file was created once with the installer's profile.
+            config = root / "home/.config/faster-whisper-dictation/config.yaml"
+            sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+            import settings
+            loaded = settings.load({}, str(config))
+            self.assertEqual(loaded.events, [])
+            self.assertEqual({k: v for k, v in loaded.values.items() if loaded.sources[k] == "yaml"},
+                             {"model.name": "large-v3", "model.device": "cuda", "model.compute_type": "float16",
+                              "language.default": "nl", "recording.max_time_s": 0})
+            # An existing file, edited or a symlink, is never overwritten.
+            config.write_text("model:\n  name: small\n")
+            installed = subprocess.run(["bash", str(script)], env=env,
+                                       capture_output=True, text=True, timeout=15)
+            self.assertEqual(installed.returncode, 0, installed.stderr)
+            self.assertIn("left unchanged", installed.stdout)
+            self.assertEqual(config.read_text(), "model:\n  name: small\n")
+            target = root / "elsewhere.yaml"
+            config.unlink()
+            config.symlink_to(target)
+            installed = subprocess.run(["bash", str(script)], env=env,
+                                       capture_output=True, text=True, timeout=15)
+            self.assertEqual(installed.returncode, 0, installed.stderr)
+            self.assertTrue(config.is_symlink())
+            self.assertFalse(target.exists())
+            # Without the file the flagless unit would run the code defaults: not current.
+            config.unlink()
+            checked = subprocess.run(["bash", str(script), "--check"],
+                                     env=dict(env, ACTIVE_STATUS="0"),
+                                     capture_output=True, text=True, timeout=15)
+            self.assertEqual(checked.returncode, 1)
+            self.assertIn("settings file is missing", checked.stderr)
+            self.assertFalse(config.exists())
 
 
 if __name__ == "__main__":

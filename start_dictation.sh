@@ -26,4 +26,5 @@ fi
 export DISPLAY="${DISPLAY:-:1}"
 cd "$(dirname "$0")"
 source venv/bin/activate
-exec python3 dictation.py -m large-v3 -v cuda -c float16 -l nl -t 0
+# Settings (model, language, ...) come from config.yaml; see docs/configuration.md.
+exec python3 dictation.py
