@@ -947,23 +947,6 @@ class KeyboardReplayer():
             self.kb.release(keyboard.Key.shift)
         self.kb.release(keyboard.Key.ctrl)
 
-    def _type_via_pynput(self, text):
-        """Last-resort character-by-character typing via pynput.
-
-        Only used when no clipboard tool is available. Logs how many characters
-        failed instead of swallowing every error silently, so dropped dictation
-        is visible in the journal rather than vanishing without a trace.
-        """
-        failures = 0
-        for element in text:
-            try:
-                self.kb.type(element)
-                time.sleep(0.0025)
-            except Exception:
-                failures += 1
-        if failures:
-            print('[pynput] %d/%d characters failed to type' % (failures, len(text)))
-
     def add_to_history(self, text):
         """Put text in CopyQ history only (no clipboard change, no paste)."""
         try:
@@ -972,9 +955,11 @@ class KeyboardReplayer():
         except Exception as exc:
             return type(exc).__name__
 
-    def type_text(self, text, echo=True):
-        """Inject text into the active window, clipboard-first for every app.
+    def type_text(self, text, echo=True, rewrite_mode=False):
+        """Paste only; never synthesize character or Return key events.
 
+        Ordinary dictation is always single-line, including recovery/status text.
+        Only rewrite mode may retain paragraphs, and never in known terminals.
         echo=False keeps the text out of stdout/the journal (rewrite mode).
         """
         if not text:
@@ -984,6 +969,17 @@ class KeyboardReplayer():
         focus_ok = self._restore_target_window()
         wm_class = self._get_active_window_class()
         terminal = wm_class in self.TERMINAL_CLASSES
+        # Central safety boundary: every paste, including correction/check lines.
+        # Include all separators recognized by str.splitlines, not just CR/LF.
+        separators = '\r\n\v\f\x1c\x1d\x1e\x85\u2028\u2029'
+        flattened = 0
+        if terminal or not rewrite_mode:
+            flattened = sum(char in separators for char in text)
+            text = re.sub(r'[ \t]*[\r\n\v\f\x1c-\x1e\x85\u2028\u2029][ \t\r\n\v\f\x1c-\x1e\x85\u2028\u2029]*',
+                          ' ', text)
+        else:
+            text = text.replace('\r\n', '\n').replace('\r', '\n')
+        diagnostic('paste_line_safety', flattened_line_breaks=flattened, terminal=terminal)
         result = self._set_clipboard(text)
         result['paste'] = 'not_sent'
         result['focus_ok'] = focus_ok
@@ -2027,7 +2023,7 @@ class App():
         if wid is not None:
             self.replayer.target_wid = wid
         try:
-            delivery = self.replayer.type_text(text, echo=False)
+            delivery = self.replayer.type_text(text, echo=False, rewrite_mode=True)
         except Exception as exc:
             delivery = dict(ok=False, path='exception', error=str(exc))
         diagnostic('rewrite_delivery', rewritten=result.ok,

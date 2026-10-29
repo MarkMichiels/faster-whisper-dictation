@@ -4,6 +4,7 @@ import contextlib
 import io
 import json
 import queue
+import re
 import subprocess
 import sys
 import threading
@@ -23,7 +24,7 @@ import test_recovery
 def replayer_class():
     tree = ast.parse((Path(__file__).resolve().parents[1] / 'dictation.py').read_text())
     node = next(n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == 'KeyboardReplayer')
-    ns = dict(subprocess=subprocess, time=types.SimpleNamespace(sleep=lambda _: None),
+    ns = dict(re=re, subprocess=subprocess, time=types.SimpleNamespace(sleep=lambda _: None),
               diagnostic=coverage.diagnostic)
     exec(compile(ast.Module(body=[node], type_ignores=[]), 'replayer', 'exec'), ns)
     return ns['KeyboardReplayer']

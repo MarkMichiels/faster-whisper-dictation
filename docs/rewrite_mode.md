@@ -42,6 +42,24 @@ Sounds:
 | Two low tones after stop | Rewrite failed: the raw dictation was pasted instead |
 | Two low tones, then start sound | Rewrite mode is not configured: ordinary dictation runs |
 
+## Paste safety
+
+The app sends only the paste shortcut, never Return or keypad Enter. Ordinary
+dictation, including corrections and check lines, replaces line-separator runs
+with one space. Rewrite mode preserves paragraphs in GUI windows, normalizing
+CRLF and CR to LF. In recognized terminal windows it also replaces all line
+separators with spaces, including separators in the appended check line and in
+raw fallback text. This avoids executing lines in terminals without bracketed
+paste. CopyQ's raw recovery history remains unchanged; manually pasting that
+history is outside this safeguard.
+
+Terminal detection uses the active window's class and the configured extra
+terminal classes (`output.extra_terminal_classes`). An unknown or undetectable terminal
+is treated as a GUI window: add its class before using rewrite mode there.
+`paste_line_safety` logs only `flattened_line_breaks` (separator characters,
+so CRLF counts as two) and `terminal`; it never includes the pasted text.
+Application-specific handling of pasted text is outside the app's control.
+
 ## What happens at stop
 
 1. The ordinary stop check runs. Text it recovers is placed **where the gap

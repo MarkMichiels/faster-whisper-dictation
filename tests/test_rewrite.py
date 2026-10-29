@@ -83,7 +83,9 @@ class FakeReplayer:
         self.events.append(('history', text))
         return 0
 
-    def type_text(self, text, echo=True):
+    def type_text(self, text, echo=True, rewrite_mode=False):
+        if not echo:
+            assert rewrite_mode, 'rewrite delivery must explicitly preserve GUI paragraphs'
         if echo:
             print(text)
         self.events.append(('paste', text, self.target_wid))
@@ -361,7 +363,7 @@ class RestartTests(unittest.TestCase):
                 return 'tekst %s met een paar woorden' % name
 
         class Replayer(FakeReplayer):
-            def type_text(self, text, echo=True):
+            def type_text(self, text, echo=True, rewrite_mode=False):
                 events.append('paste %s @%s' % (text.strip(), self.target_wid))
                 return dict(ok=True, path='copyq')
             def add_to_history(self, text):
