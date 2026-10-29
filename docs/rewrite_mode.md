@@ -54,7 +54,9 @@ Sounds:
    words; otherwise "Beste <first name>," / "Dear <first name>," with the name
    from the dictation or the sender of the context email ("Beste," / "Hello,"
    without a name) and "Vriendelijke groeten," / "Best regards,". The signature
-   is not added under a sign-off that already carries a dictated name. In doubt,
+   is not added under a sign-off that already carries a dictated name; a name
+   under the sign-off that was not dictated (for example taken from the
+   context) is dropped. In doubt,
    no greeting or sign-off is added. The length check in step 4 judges the text
    without greeting and sign-off.
 6. One paste. On any failure the raw text is pasted, without a marker in the

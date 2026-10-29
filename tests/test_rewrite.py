@@ -430,7 +430,8 @@ def mail_answer(fields, finish='stop'):
 class EmailTests(unittest.TestCase):
     """A clear email gets greeting, body and sign-off; anything else stays body only."""
 
-    RAW = 'ja eh dus de levering van de pompen mag vrijdag komen en de factuur volgt later'
+    RAW = ('ja eh dus de levering van de pompen mag vrijdag komen en de factuur volgt later '
+           'groetjes Voornaam')
 
     def run_rewrite(self, fields, cfg=None, language='nl'):
         out = io.StringIO()
@@ -469,11 +470,21 @@ class EmailTests(unittest.TestCase):
 
     def test_dictated_name_is_not_doubled(self):
         cfg = config(signature='Voornaam Achternaam')
-        for closing in ('Groetjes, Voornaam', 'Groetjes,\nVoornaam', 'Groetjes,\nIemand Anders'):
+        for closing in ('Groetjes, Voornaam', 'Groetjes,\nVoornaam'):
             result, _ = self.run_rewrite({'mail': True, 'aanhef': 'Dag Els,', 'tekst': 'De pompen komen vrijdag.',
                                           'afsluiting': closing}, cfg)
             self.assertTrue(result.text.endswith('\n\n' + closing), closing)
             self.assertEqual(result.text.count('Voornaam'), closing.count('Voornaam'))
+
+    def test_undictated_name_under_closing_is_replaced_by_signature(self):
+        # The model took a name from the context; it was not dictated.
+        answer = {'mail': True, 'aanhef': 'Beste Bart,', 'tekst': 'De pompen komen vrijdag.',
+                  'afsluiting': 'Vriendelijke groeten,\nUitDeContext'}
+        result, _ = self.run_rewrite(answer, config(signature='Voornaam Achternaam'))
+        self.assertTrue(result.text.endswith('\n\nVriendelijke groeten,\nVoornaam Achternaam'))
+        result, _ = self.run_rewrite(answer)
+        self.assertTrue(result.text.endswith('\n\nVriendelijke groeten,'))
+        self.assertNotIn('UitDeContext', result.text)
 
     def test_not_an_email_stays_body_only(self):
         result, journal = self.run_rewrite({'mail': False, 'aanhef': 'Beste,', 'tekst': 'Pompen vrijdag, factuur later.',

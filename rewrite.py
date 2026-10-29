@@ -259,11 +259,20 @@ def response_format(field: str) -> dict[str, Any]:
                    'required': [flag, greeting, body, closing], 'additionalProperties': False}}}
 
 
-def compose(answer: dict[str, Any], field: str, signature: str = '') -> tuple[str, bool]:
+def _dictated(line: str, raw: str) -> bool:
+    """True when every word of a closing line also occurs in the raw dictation."""
+    spoken = set(re.findall(r'\w+', raw.lower()))
+    words = re.findall(r'\w+', line.lower())
+    return bool(words) and all(w in spoken for w in words)
+
+
+def compose(answer: dict[str, Any], field: str, signature: str = '', raw: str = '') -> tuple[str, bool]:
     """(body, False) for ordinary text; (greeting + body + closing [+ signature], True) for an email.
 
-    The signature is added only under a one-line closing that does not already
-    carry its first word, so a dictated name is never doubled.
+    A name line under the closing that was not dictated is dropped (models
+    tend to take the user's name from the context). The signature is added
+    only under a one-line closing that does not already carry its first word,
+    so a dictated name is never doubled.
     """
     flag, greeting_key, body_key, closing_key = answer_fields(field)
     body = tidy(answer[body_key])
@@ -272,6 +281,9 @@ def compose(answer: dict[str, Any], field: str, signature: str = '') -> tuple[st
     lang = 'en' if field == 'text' else 'nl'
     greeting = tidy(str(answer.get(greeting_key) or '')) or DEFAULT_GREETING[lang]
     closing = tidy(str(answer.get(closing_key) or '')) or DEFAULT_CLOSING[lang]
+    lines = closing.split('\n')
+    if len(lines) > 1 and not _dictated(lines[-1], raw):
+        closing = '\n'.join(lines[:-1]).strip() or DEFAULT_CLOSING[lang]
     if signature and '\n' not in closing:
         first = signature.split()[0]
         if not re.search(r'(?<!\w)%s(?!\w)' % re.escape(first), closing, re.I):
@@ -414,7 +426,7 @@ def rewrite(raw: str, language: Optional[str], context: Optional[str],
         # The plausibility check judges the body only: an added greeting and
         # sign-off must not push a short email over the length bound.
         problem = check_answer(raw, body)
-        out, is_email = compose(answer, field, config.signature)
+        out, is_email = compose(answer, field, config.signature, raw)
         usage = data.get('usage') or {}
         meta.update(seconds=round(time.monotonic() - t0, 3), provider=data.get('provider'),
                     tokens_in=usage.get('prompt_tokens'), tokens_out=usage.get('completion_tokens'),
