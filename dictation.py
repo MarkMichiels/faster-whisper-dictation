@@ -1557,12 +1557,22 @@ class App():
         # Rewrite mode (Left-Alt + double tap). Optional; without configuration
         # the hotkey falls back to ordinary dictation with a journal line.
         self.rewrite_config, self.rewrite_reason = rewrite.load_config()
-        if self.rewrite_config:
-            print('Rewrite mode: model %s, time-out %gs.'
-                  % (self.rewrite_config.model, self.rewrite_config.timeout_s))
-        else:
+        self._announce_rewrite()
+
+    def _announce_rewrite(self):
+        if not self.rewrite_config:
             print('Rewrite mode: not available (%s); Left-Alt sessions dictate normally.'
                   % self.rewrite_reason)
+            return
+        limit, problem = context_capture.max_chars_setting()
+        if problem:
+            # The reason only, never the configured value.
+            diagnostic('rewrite_setting_invalid', setting=context_capture.MAX_CHARS_ENV,
+                       reason=problem, default=limit)
+        print('Rewrite mode: model %s, time-out %gs, reply context up to %d characters%s.'
+              % (self.rewrite_config.model, self.rewrite_config.timeout_s, limit,
+                 ' (%s invalid: %s, default used)' % (context_capture.MAX_CHARS_ENV, problem)
+                 if problem else ''))
 
     def beep(self, k, wait=True):
         playsound(self.SOUND_EFFECTS[k], wait=wait)

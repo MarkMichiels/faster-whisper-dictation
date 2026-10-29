@@ -76,9 +76,17 @@ Age is the selection owner's `TIMESTAMP` against the X server clock; an owner
 without `TIMESTAMP` counts as too old. No context is taken when the selection
 carries a password-manager hint (`x-kde-passwordManagerHint`) or CopyQ's hidden
 flag, looks like a secret (private-key header, common API-key prefixes, one long
-token with digits), or is shorter than 20 characters. Longer than 8,000
-characters: the beginning is kept and `[ingekort]` is appended. The context lives
-only in memory for that session and is cleared when the session ends.
+token with digits), or is shorter than 20 characters. The context lives only
+in memory for that session and is cleared when the session ends.
+
+Up to 100,000 characters are sent (roughly 30,000–40,000 tokens; set
+`DICTATION_REWRITE_CONTEXT_MAX_CHARS` to change it). Longer text keeps its first
+and its last half of that limit with `[ingekort]` on a line in between: a mail
+thread shows the oldest message on top and the newest at the bottom, a quoted
+reply the other way round, so the message being answered can sit at either end.
+Reading the selection is not the bottleneck (a million characters read in a few
+milliseconds on a test display); the limit bounds cost and waiting time, which
+grow with the context.
 
 ## Configure
 
@@ -101,6 +109,7 @@ DICTATION_REWRITE_TIMEOUT_S=30
 # DICTATION_REWRITE_TERMS_FILE=/path/to/terms.txt
 # DICTATION_REWRITE_WORD_FACTOR=0.45
 # DICTATION_REWRITE_SIGNATURE=Your Name
+# DICTATION_REWRITE_CONTEXT_MAX_CHARS=100000
 ```
 
 | Variable | Meaning |
@@ -113,6 +122,7 @@ DICTATION_REWRITE_TIMEOUT_S=30
 | `DICTATION_REWRITE_STYLE_FILE` | Optional few lines of preferences, sent with every request |
 | `DICTATION_REWRITE_TERMS_FILE` | Optional term list the model must spell exactly |
 | `DICTATION_REWRITE_WORD_FACTOR` | Optional: for dictations above 120 words, ask for at most factor x words (default off) |
+| `DICTATION_REWRITE_CONTEXT_MAX_CHARS` | Optional: most characters of reply context sent, 1,000–500,000 (default 100,000). An invalid value falls back to the default; the journal then gets `rewrite_setting_invalid` with the reason, never the value |
 | `DICTATION_REWRITE_SIGNATURE` | Optional name under the sign-off of an email; a literal `\n` starts a new line (max. 200 characters). Without it the sign-off line stands alone |
 
 Every request also sends `provider: {zdr: true, data_collection: "deny",
@@ -130,7 +140,7 @@ logs `Rewrite mode: not available (<reason>)`; a Left-Alt start then logs
 With a cloud endpoint the dictation **and the captured reply context** (often
 someone else's text) leave the machine for the provider. The journal never gets
 the rewritten text or the context, only metadata: `rewrite_context` (source,
-characters, age, truncation, refusal reasons), `rewrite_outcome` (model,
+characters sent and before shortening, age, truncation, refusal reasons), `rewrite_outcome` (model,
 provider, seconds, tokens, cost, word ratio, whether an email was built) or `rewrite_failed` (reason). The
 raw dictation is still logged by the ordinary `DCT-COVERAGE` records, as in
 ordinary dictation. CopyQ history receives both the raw and the pasted text.

@@ -698,13 +698,68 @@ class ContextTests(AppStart, unittest.TestCase):
                 ctx = context_capture.capture(self.fake_run(both(), {'primary': text}))
                 self.assertIsNone(ctx.text)
                 self.assertEqual(ctx.reasons['primary'], reason)
-        long_mail = 'Nieuwste bericht bovenaan. ' + 'oude draad ' * 2000
+        long_mail = 'Bovenste bericht. ' + 'middelste draad ' * 2000 + 'Onderste bericht.'
         ctx = context_capture.capture(self.fake_run(both(), {'primary': long_mail}), max_chars=200)
         self.assertTrue(ctx.truncated)
-        self.assertTrue(ctx.text.startswith('Nieuwste bericht bovenaan.'))
-        self.assertTrue(ctx.text.endswith('\n[ingekort]'))
-        self.assertLessEqual(len(ctx.text), 200 + len('\n[ingekort]'))
-        self.assertEqual(set(ctx.journal()), {'source', 'chars', 'age_s', 'truncated', 'reasons'})
+        # Both ends survive: the message being answered may sit on top or at the bottom.
+        self.assertTrue(ctx.text.startswith('Bovenste bericht.'))
+        self.assertTrue(ctx.text.endswith('Onderste bericht.'))
+        self.assertEqual(ctx.text.count('\n[ingekort]\n'), 1)
+        self.assertLessEqual(len(ctx.text), 200 + len('\n[ingekort]\n'))
+        self.assertEqual((ctx.chars, ctx.original_chars), (len(ctx.text), len(long_mail)))
+        self.assertEqual(set(ctx.journal()),
+                         {'source', 'chars', 'age_s', 'truncated', 'original_chars', 'reasons'})
+        fits = 'Past precies binnen de grens. ' * 6
+        ctx = context_capture.capture(self.fake_run(both(), {'primary': fits}), max_chars=len(fits.strip()))
+        self.assertEqual((ctx.text, ctx.truncated), (fits.strip(), False))
+
+    def test_default_limit_keeps_a_long_thread_whole(self):
+        both = {'primary': self.sel(), 'clipboard': dict(owner=False)}
+        thread = 'Een lange draad met vele berichten. ' * 2500  # ~90,000 characters
+        with patch.dict(os.environ, {}):
+            os.environ.pop(context_capture.MAX_CHARS_ENV, None)
+            ctx = context_capture.capture(self.fake_run(both, {'primary': thread}))
+        self.assertEqual(context_capture.DEFAULT_MAX_CHARS, 100_000)
+        self.assertEqual((ctx.text, ctx.truncated), (thread.strip(), False))
+        with patch.dict(os.environ, {context_capture.MAX_CHARS_ENV: '5000'}):
+            ctx = context_capture.capture(self.fake_run(both, {'primary': thread}))
+        self.assertTrue(ctx.truncated)
+        self.assertLessEqual(ctx.chars, 5000 + len('\n[ingekort]\n'))
+
+    def test_limit_setting(self):
+        setting = context_capture.max_chars_setting
+        name = context_capture.MAX_CHARS_ENV
+        default = context_capture.DEFAULT_MAX_CHARS
+        self.assertEqual(setting({}), (default, None))
+        self.assertEqual(setting({name: ' '}), (default, None))
+        self.assertEqual(setting({name: '30000'}), (30000, None))
+        self.assertEqual(setting({name: '250_000'}), (250000, None))
+        for value, reason in (('veel', 'not_a_number'), ('1e5', 'not_a_number'), ('12.5', 'not_a_number'),
+                              ('999', 'out_of_range'), ('-5', 'out_of_range'), ('500001', 'out_of_range')):
+            with self.subTest(value=value):
+                self.assertEqual(setting({name: value}), (default, reason))
+
+    def test_invalid_limit_is_journaled_without_its_value(self):
+        app = app_logic()['App'].__new__(app_logic()['App'])
+        app.rewrite_config, app.rewrite_reason = config(), None
+        name = context_capture.MAX_CHARS_ENV
+        for value, reason in (('geheim-12345', 'not_a_number'), ('99999999', 'out_of_range')):
+            with self.subTest(reason=reason):
+                out = io.StringIO()
+                with patch.dict(os.environ, {name: value}), contextlib.redirect_stdout(out):
+                    app._announce_rewrite()
+                lines = out.getvalue()
+                self.assertNotIn(value, lines)
+                records = [json.loads(line.split(' ', 1)[1]) for line in lines.splitlines()
+                           if line.startswith('DCT-COVERAGE ')]
+                self.assertEqual([(r['kind'], r['setting'], r['reason'], r['default']) for r in records],
+                                 [('rewrite_setting_invalid', name, reason, 100_000)])
+                self.assertIn('up to 100000 characters (%s invalid: %s, default used)' % (name, reason), lines)
+        out = io.StringIO()
+        with patch.dict(os.environ, {name: '30000'}), contextlib.redirect_stdout(out):
+            app._announce_rewrite()
+        self.assertEqual(out.getvalue().strip(),
+                         'Rewrite mode: model fake/model, time-out 30s, reply context up to 30000 characters.')
 
     def test_captured_once_at_start_and_used_at_stop(self):
         selection = {'text': 'MAIL-BIJ-START: kunnen jullie de levering bevestigen?'}
