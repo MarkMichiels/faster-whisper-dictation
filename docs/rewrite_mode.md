@@ -47,9 +47,19 @@ Sounds:
 4. The answer is checked: empty, more than 1.2x or fewer than 0.15x the raw
    word count, an introduction ("Here is…"), a truncated or malformed answer all
    count as failure. Quotes or a code fence around the whole answer are removed.
-5. One paste. On any failure the raw text is pasted, without a marker in the
+5. When the text is clearly an email (the context is an email, or the
+   dictation mentions an email or reply, or contains a greeting or sign-off),
+   it is built as a complete plain-text email: greeting, the text, sign-off and
+   the configured signature. A dictated greeting or sign-off is kept in its own
+   words; otherwise "Beste <first name>," / "Dear <first name>," with the name
+   from the dictation or the sender of the context email ("Beste," / "Hello,"
+   without a name) and "Vriendelijke groeten," / "Best regards,". The signature
+   is not added under a sign-off that already carries a dictated name. In doubt,
+   no greeting or sign-off is added. The length check in step 4 judges the text
+   without greeting and sign-off.
+6. One paste. On any failure the raw text is pasted, without a marker in the
    text, and the journal gets `rewrite_failed` with the reason.
-6. A range that could not be found back still adds the `[Controle: …]` line
+7. A range that could not be found back still adds the `[Controle: …]` line
    after the text; it is never sent to the model.
 
 ## Reply context
@@ -88,6 +98,7 @@ DICTATION_REWRITE_TIMEOUT_S=30
 # DICTATION_REWRITE_STYLE_FILE=/path/to/rewrite_style.md
 # DICTATION_REWRITE_TERMS_FILE=/path/to/terms.txt
 # DICTATION_REWRITE_WORD_FACTOR=0.45
+# DICTATION_REWRITE_SIGNATURE=Your Name
 ```
 
 | Variable | Meaning |
@@ -100,6 +111,7 @@ DICTATION_REWRITE_TIMEOUT_S=30
 | `DICTATION_REWRITE_STYLE_FILE` | Optional few lines of preferences, sent with every request |
 | `DICTATION_REWRITE_TERMS_FILE` | Optional term list the model must spell exactly |
 | `DICTATION_REWRITE_WORD_FACTOR` | Optional: for dictations above 120 words, ask for at most factor x words (default off) |
+| `DICTATION_REWRITE_SIGNATURE` | Optional name under the sign-off of an email; a literal `\n` starts a new line (max. 200 characters). Without it the sign-off line stands alone |
 
 Every request also sends `provider: {zdr: true, data_collection: "deny",
 require_parameters: true}` (OpenRouter: only zero-data-retention endpoints, no
@@ -117,7 +129,7 @@ With a cloud endpoint the dictation **and the captured reply context** (often
 someone else's text) leave the machine for the provider. The journal never gets
 the rewritten text or the context, only metadata: `rewrite_context` (source,
 characters, age, truncation, refusal reasons), `rewrite_outcome` (model,
-provider, seconds, tokens, cost, word ratio) or `rewrite_failed` (reason). The
+provider, seconds, tokens, cost, word ratio, whether an email was built) or `rewrite_failed` (reason). The
 raw dictation is still logged by the ordinary `DCT-COVERAGE` records, as in
 ordinary dictation. CopyQ history receives both the raw and the pasted text.
 

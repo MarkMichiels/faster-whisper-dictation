@@ -396,7 +396,7 @@ class PrivacyTests(RewriteTestCase):
         system, user = (m['content'] for m in bodies[0]['messages'])
         self.assertIn('Voorkeuren van de gebruiker:\nSpreek de lezer aan met u.', system)
         self.assertIn('Schrijf deze termen exact zo:\nVoorbeeldstad', system)
-        self.assertTrue(system.endswith('Geef JSON terug met één veld "tekst".'))
+        self.assertTrue(system.endswith('Geef JSON terug met de velden "mail", "aanhef", "tekst" en "afsluiting".'))
         self.assertIn('<context>\nCONTEXT-MARKER-XYZ', user)
         self.assertIn('</context>\n\n<dictaat>\n', user)
         self.assertTrue(user.endswith('</dictaat>'))
@@ -404,7 +404,8 @@ class PrivacyTests(RewriteTestCase):
         self.assertEqual(body['provider']['zdr'], True)
         self.assertEqual(body['provider']['data_collection'], 'deny')
         self.assertEqual(body['reasoning'], {'enabled': False})
-        self.assertEqual(body['response_format']['json_schema']['schema']['required'], ['tekst'])
+        self.assertEqual(body['response_format']['json_schema']['schema']['required'],
+                         ['mail', 'aanhef', 'tekst', 'afsluiting'])
 
     def test_without_style_file_prompt_is_plain_v2(self):
         messages, _ = rewrite.build_messages('tekst', 'nl', None, config(style_file='/nonexistent/style.md'))
@@ -418,6 +419,83 @@ class PrivacyTests(RewriteTestCase):
         self.assertIn('krimpen. Gebruik hoogstens 70 woorden.', long)
         self.assertIn('third. Use at most 70 words.', rewrite.system_prompt('en', cfg, 155))
         self.assertEqual(rewrite.system_prompt('nl', config(), 155), rewrite.PROMPT_NL)
+
+
+def mail_answer(fields, finish='stop'):
+    return {'choices': [{'message': {'content': json.dumps(fields)}, 'finish_reason': finish}],
+            'usage': {'prompt_tokens': 700, 'completion_tokens': 60, 'cost': 0.0003},
+            'provider': 'FakeProvider'}
+
+
+class EmailTests(unittest.TestCase):
+    """A clear email gets greeting, body and sign-off; anything else stays body only."""
+
+    RAW = 'ja eh dus de levering van de pompen mag vrijdag komen en de factuur volgt later'
+
+    def run_rewrite(self, fields, cfg=None, language='nl'):
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            result = rewrite.rewrite(self.RAW, language, None, cfg or config(),
+                                     call=lambda *a: mail_answer(fields))
+        return result, out.getvalue()
+
+    def test_schema_and_prompt_ask_for_email_fields(self):
+        for lang, flag in (('nl', 'mail'), ('en', 'email')):
+            messages, field = rewrite.build_messages('x', lang, None, config())
+            schema = rewrite.response_format(field)['json_schema']['schema']
+            self.assertEqual(schema['properties'][flag], {'type': 'boolean'})
+            self.assertEqual(schema['required'][2], field)
+            self.assertIn('"%s"' % flag, messages[0]['content'])
+
+    def test_email_is_composed_with_signature(self):
+        cfg = config(signature='Voornaam Achternaam')
+        result, journal = self.run_rewrite(
+            {'mail': True, 'aanhef': 'Beste Katrien,', 'tekst': 'De pompen mogen vrijdag geleverd worden.',
+             'afsluiting': 'Vriendelijke groeten,'}, cfg)
+        self.assertTrue(result.ok)
+        self.assertEqual(result.text, 'Beste Katrien,\n\nDe pompen mogen vrijdag geleverd worden.'
+                                      '\n\nVriendelijke groeten,\nVoornaam Achternaam')
+        self.assertIn('"email": true', journal)
+        self.assertNotIn('Katrien', journal)
+        self.assertNotIn('Achternaam', journal)
+
+    def test_email_without_signature_has_sign_off_line_only(self):
+        result, _ = self.run_rewrite({'mail': True, 'aanhef': '', 'tekst': 'De pompen mogen vrijdag komen.',
+                                      'afsluiting': ''})
+        self.assertEqual(result.text, 'Beste,\n\nDe pompen mogen vrijdag komen.\n\nVriendelijke groeten,')
+        result, _ = self.run_rewrite({'email': True, 'greeting': '', 'text': 'The pumps may arrive Friday.',
+                                      'closing': ''}, language='en')
+        self.assertEqual(result.text, 'Hello,\n\nThe pumps may arrive Friday.\n\nBest regards,')
+
+    def test_dictated_name_is_not_doubled(self):
+        cfg = config(signature='Voornaam Achternaam')
+        for closing in ('Groetjes, Voornaam', 'Groetjes,\nVoornaam', 'Groetjes,\nIemand Anders'):
+            result, _ = self.run_rewrite({'mail': True, 'aanhef': 'Dag Els,', 'tekst': 'De pompen komen vrijdag.',
+                                          'afsluiting': closing}, cfg)
+            self.assertTrue(result.text.endswith('\n\n' + closing), closing)
+            self.assertEqual(result.text.count('Voornaam'), closing.count('Voornaam'))
+
+    def test_not_an_email_stays_body_only(self):
+        result, journal = self.run_rewrite({'mail': False, 'aanhef': 'Beste,', 'tekst': 'Pompen vrijdag, factuur later.',
+                                            'afsluiting': 'Groeten,'}, config(signature='Voornaam'))
+        self.assertEqual(result.text, 'Pompen vrijdag, factuur later.')
+        self.assertIn('"email": false', journal)
+
+    def test_length_check_judges_body_only(self):
+        # 16 dictated words, body of 15: an added greeting and sign-off must not trip the 1.2x bound.
+        body = ' '.join(['woord'] * 15)
+        result, _ = self.run_rewrite({'mail': True, 'aanhef': 'Beste collega van de aankoopdienst,', 'tekst': body,
+                                      'afsluiting': 'Met heel vriendelijke groeten en tot binnenkort,'},
+                                     config(signature='Voornaam Achternaam'))
+        self.assertTrue(result.ok)
+        result, _ = self.run_rewrite({'mail': True, 'aanhef': 'Beste,', 'tekst': 'Ja.', 'afsluiting': 'Groeten,'})
+        self.assertEqual((result.ok, result.reason, result.text), (False, 'answer_too_short', self.RAW))
+
+    def test_signature_from_environment(self):
+        env = dict(DICTATION_REWRITE_ENDPOINT=ENDPOINT, DICTATION_REWRITE_MODEL='m')
+        self.assertEqual(rewrite.load_config(env)[0].signature, '')
+        env['DICTATION_REWRITE_SIGNATURE'] = ' Voornaam Achternaam\\nAfdeling '
+        self.assertEqual(rewrite.load_config(env)[0].signature, 'Voornaam Achternaam\nAfdeling')
 
 
 class AppStart:
