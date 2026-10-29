@@ -897,7 +897,7 @@ class KeyboardReplayer():
                         'alacritty', 'terminator', 'st', 'wezterm', 'tilix',
                         'urxvt', 'rxvt'}
 
-    def _set_clipboard(self, text):
+    def _set_clipboard(self, text: str, html: str | None = None) -> dict:
         """Place text on the system clipboard AND into CopyQ history.
 
         Clipboard-first injection: doing this for every app guarantees the
@@ -912,29 +912,74 @@ class KeyboardReplayer():
         leaves the clipboard untouched. Both are needed — add for recovery,
         copy for the paste.
         """
-        result = dict(ok=False, path='none', copyq_add=None, copyq_copy=None, xclip=None)
+        import uuid
+        result = dict(ok=False, path='none', copyq_add=None, copyq_copy=None,
+                      xclip=None, html_offered=False)
+        token = uuid.uuid4().hex
         try:
-            for action in ('add', 'copy'):
-                command = subprocess.run(['copyq', action, '--', text], timeout=3,
-                                         check=False, stderr=subprocess.DEVNULL)
-                result['copyq_' + action] = command.returncode
-                if command.returncode:
-                    raise RuntimeError('copyq %s rc=%d' % (action, command.returncode))
+            command = subprocess.run(['copyq', 'add', '--', text], timeout=3,
+                                     check=False, stderr=subprocess.DEVNULL)
+            result['copyq_add'] = command.returncode
+            if command.returncode:
+                raise RuntimeError('history_failed')
+            payload = ['text/plain', text, 'application/x-dictation-owner', token]
+            if html:
+                payload += ['text/html', html]
+            command = subprocess.run(['copyq', 'copy'] + payload, timeout=3,
+                                     check=False, stderr=subprocess.DEVNULL)
+            result['copyq_copy'] = command.returncode
+            if command.returncode:
+                raise RuntimeError('copy_failed')
             time.sleep(0.05)
-            result.update(ok=True, path='copyq')
+            result.update(ok=True, path='copyq', html_offered=bool(html), owner_token=token)
             return result
         except Exception as exc:
-            result['copyq_error'] = str(exc)
+            # Exception messages may contain subprocess arguments (private text).
+            result['copyq_error'] = type(exc).__name__
             diagnostic('copyq_failure', **result)
         try:
-            command = subprocess.run(['xclip', '-selection', 'clipboard'],
-                                     input=text.encode('utf-8'), timeout=3, check=False)
+            command = subprocess.run(['xclip', '-selection', 'clipboard', '-t', 'text/plain'],
+                                     input=text.encode('utf-8'), timeout=3, check=False,
+                                     stderr=subprocess.DEVNULL)
             result['xclip'] = command.returncode
             result.update(ok=command.returncode == 0, path='xclip')
         except Exception as exc:
-            result['xclip_error'] = str(exc)
+            result['xclip_error'] = type(exc).__name__
         diagnostic('clipboard_fallback', **result)
         return result
+
+    def _clipboard_owned(self, text: str, html: str | None, path: str, token: str | None) -> bool:
+        """Compare our actual MIME payload immediately before the shortcut.
+
+        This is not atomic with paste; never restore or overwrite a new owner.
+        Unknown/read-error means refusal, not permission.
+        """
+        try:
+            if path == 'copyq':
+                if not token:
+                    return False
+                def read(mime):
+                    return subprocess.check_output(['copyq', 'clipboard', mime],
+                                                   timeout=2, stderr=subprocess.DEVNULL)
+                return (read('application/x-dictation-owner') == token.encode('utf-8')
+                        and read('text/plain') == text.encode('utf-8')
+                        and (read('text/html') == html.encode('utf-8') if html else
+                             b'text/html' not in read('?').splitlines()))
+            if path == 'xclip':
+                return subprocess.check_output(
+                    ['xclip', '-selection', 'clipboard', '-o', '-t', 'text/plain'],
+                    timeout=2, stderr=subprocess.DEVNULL) == text.encode('utf-8')
+        except Exception:
+            pass
+        return False
+
+    def _delivery_alert(self) -> None:
+        """Two low tones: clipboard degradation or refused paste."""
+        try:
+            playsound(rewrite_sounds(loadwav(SOUND_START))['rewrite_failed'], wait=False)
+        except Exception as exc:
+            # Sound failure must not bypass the refusal or hide its receipt.
+            diagnostic('paste_alert_failed', error=type(exc).__name__)
 
     def _send_paste(self, terminal):
         """Send the paste shortcut: Ctrl+Shift+V in terminals, Ctrl+V elsewhere."""
@@ -955,12 +1000,14 @@ class KeyboardReplayer():
         except Exception as exc:
             return type(exc).__name__
 
-    def type_text(self, text, echo=True, rewrite_mode=False):
+    def type_text(self, text: str, echo: bool = True, rewrite_mode: bool = False,
+                  html: str | None = None, terminal_mode: bool = False) -> dict | None:
         """Paste only; never synthesize character or Return key events.
 
-        Ordinary dictation is always single-line, including recovery/status text.
-        Only rewrite mode may retain paragraphs, and never in known terminals.
-        echo=False keeps the text out of stdout/the journal (rewrite mode).
+        Plain MIME is always single-line, including recovery/status text.
+        HTML requires explicit rich rewrite permission. WM_CLASS only selects
+        the shortcut; terminal_mode forces Ctrl+Shift+V and forbids HTML.
+        echo=False keeps rewritten content out of stdout/the journal.
         """
         if not text:
             return
@@ -968,30 +1015,42 @@ class KeyboardReplayer():
             print(text)
         focus_ok = self._restore_target_window()
         wm_class = self._get_active_window_class()
-        terminal = wm_class in self.TERMINAL_CLASSES
+        terminal = terminal_mode or wm_class in self.TERMINAL_CLASSES
         # Central safety boundary: every paste, including correction/check lines.
         # Include all separators recognized by str.splitlines, not just CR/LF.
         separators = '\r\n\v\f\x1c\x1d\x1e\x85\u2028\u2029'
-        flattened = 0
-        if terminal or not rewrite_mode:
-            flattened = sum(char in separators for char in text)
-            text = re.sub(r'[ \t]*[\r\n\v\f\x1c-\x1e\x85\u2028\u2029][ \t\r\n\v\f\x1c-\x1e\x85\u2028\u2029]*',
-                          ' ', text)
-        else:
-            text = text.replace('\r\n', '\n').replace('\r', '\n')
+        flattened = sum(char in separators for char in text)
+        text = re.sub(r'[ \t]*[\r\n\v\f\x1c-\x1e\x85\u2028\u2029][ \t\r\n\v\f\x1c-\x1e\x85\u2028\u2029]*',
+                      ' ', text)
+        if not rewrite_mode or terminal_mode:
+            html = None
+        mode = 'terminal' if terminal_mode else 'rich' if rewrite_mode else 'plain'
         diagnostic('paste_line_safety', flattened_line_breaks=flattened, terminal=terminal)
-        result = self._set_clipboard(text)
+        result = self._set_clipboard(text, html) if html else self._set_clipboard(text)
+        token = result.pop('owner_token', None)
+        result.update(mode=mode, shortcut='Ctrl+Shift+V' if terminal else 'Ctrl+V',
+                      ownership='not_checked')
+        if html and not result.get('html_offered'):
+            self._delivery_alert()
         result['paste'] = 'not_sent'
         result['focus_ok'] = focus_ok
         if not focus_ok:
             result['ok'] = False
         if result['ok']:
+            owned = self._clipboard_owned(text, html if result.get('html_offered') else None,
+                                          result['path'], token)
+            result['ownership'] = 'matched' if owned else 'mismatch_or_unreadable'
+            if not owned:
+                result.update(ok=False, paste='refused_clipboard_changed')
+                self._delivery_alert()
+        if result['ok']:
             try:
                 self._send_paste(terminal)
                 result['paste'] = 'shortcut_sent_not_acknowledged'
             except Exception as exc:
-                result.update(ok=False, paste='failed', paste_error=str(exc))
+                result.update(ok=False, paste='failed', paste_error=type(exc).__name__)
         # No unverified character fallback: retained text goes to stop recovery.
+        diagnostic('paste_delivery', **result)
         return result
 
     def replay(self, event):
@@ -1045,6 +1104,10 @@ class MultiTapKeyListener():
     reports the Left-Alt key as Meta_L (its second keymap level), so Meta_L
     counts as Left-Alt for press and release alike.
 
+    Left-Ctrl (vk 65507) also requests rewrite and selects terminal mode.
+    It takes priority over Left-Alt; Right-Ctrl (vk 65508) only counts taps.
+    Modifier flags are snapshotted at the second tap, never global Ctrl state.
+
     The double-tap calls activate_callback(language, rewrite, keys); keys is
     metadata about the modifiers at that moment (held flags, how long held or
     how long ago released), for the journal.
@@ -1069,8 +1132,10 @@ class MultiTapKeyListener():
         self.shift_held = False
         self.alt_held = False
         self.alt_as_meta = False
+        self.ctrl_held = False
+        self.main_down = False
         # Last press / release time per modifier, for the journal only.
-        self.mod_times = {'shift': [None, None], 'alt': [None, None]}
+        self.mod_times = {'shift': [None, None], 'alt': [None, None], 'ctrl': [None, None]}
         self.last_press_time = 0
         self.tap_count = 0
         self.lang_last_press_time = 0
@@ -1103,7 +1168,7 @@ class MultiTapKeyListener():
         """Modifier state at the second tap: metadata only, no key text."""
         now = time.time() if now is None else now
         info = {}
-        for mod, held in (('shift', self.shift_held), ('alt', self.alt_held)):
+        for mod, held in (('shift', self.shift_held), ('alt', self.alt_held), ('ctrl', self.ctrl_held)):
             down, up = self.mod_times[mod]
             info[mod] = held
             if held and down is not None:
@@ -1116,6 +1181,11 @@ class MultiTapKeyListener():
 
     def on_press(self, key):
         name = getattr(key, 'name', None)
+        if self._get_vk(key) == 65507:
+            if not self.ctrl_held:
+                self._mod_event('ctrl', True)
+            self.ctrl_held = True
+            return
         # Track Left-Shift held state for momentary language selection. Holding
         # Left-Shift while double-tapping the main key dictates in the shift
         # language (English) for that session only. Left-Shift reports name
@@ -1134,15 +1204,16 @@ class MultiTapKeyListener():
                 self.alt_as_meta = name is None
             self.alt_held = True
             return
-        # Skip generic modifier events (e.g. Key.ctrl vk=65507) that pynput
-        # sends alongside the specific Key.ctrl_r/Key.ctrl_l events.
-        # Without this, pressing Ctrl_R triggers both Key.ctrl_r AND Key.ctrl,
-        # and Key.ctrl shares vk=65507 with Key.ctrl_l causing false matches.
+        # Left-Ctrl was handled by vk above. Never derive it from a global
+        # Ctrl state: that would also include the Right-Ctrl start key.
         if name in ('ctrl', 'alt'):
             return
 
         # Main key: Ctrl_R — double-tap start, single-tap stop
         if self._key_matches(key, self.key):
+            if self.main_down:
+                return  # autorepeat is not a second tap
+            self.main_down = True
             current_time = time.time()
             if current_time - self.last_press_time < self.TAP_WINDOW:
                 self.tap_count += 1
@@ -1152,7 +1223,10 @@ class MultiTapKeyListener():
 
             if self.tap_count == 2:
                 language = self.shift_language if self.shift_held else self.default_language
-                self.activate_callback(language, self.alt_held, self.keys_info(current_time))
+                self.tap_count = 0
+                self.last_press_time = 0
+                self.activate_callback(language, self.alt_held or self.ctrl_held,
+                                       self.keys_info(current_time))
             elif self.tap_count == 1:
                 self.deactivate_callback()
 
@@ -1172,7 +1246,13 @@ class MultiTapKeyListener():
 
     def on_release(self, key):
         name = getattr(key, 'name', None)
-        if name in ('shift', 'shift_l'):
+        if self._key_matches(key, self.key):
+            self.main_down = False
+        if self._get_vk(key) == 65507:
+            if self.ctrl_held:
+                self._mod_event('ctrl', False)
+            self.ctrl_held = False
+        elif name in ('shift', 'shift_l'):
             if self.shift_held:
                 self._mod_event('shift', False)
             self.shift_held = False
@@ -1587,7 +1667,7 @@ class App():
 
         def __init__(self, transcription_queue, typing_queue, ledger=None, recorder=None,
                      previous=None, language=_UNSET, target_wid=None, rewrite=False,
-                     output_language=_UNSET):
+                     output_language=_UNSET, terminal_mode=False):
             self.transcription_queue = transcription_queue
             self.typing_queue = typing_queue
             self.ledger = ledger
@@ -1600,6 +1680,8 @@ class App():
             # active at stop (paste_wid). context lives only in this object
             # and is cleared when the session ends.
             self.rewrite = rewrite
+            self.terminal_mode = terminal_mode
+            self.mode = 'terminal' if terminal_mode else 'rich' if rewrite else 'plain'
             # Language the rewrite is written in; by default the recognition language.
             self.output_language = language if output_language is _UNSET else output_language
             self.context = None
@@ -1671,7 +1753,8 @@ class App():
         None means auto-detect. _UNSET (combo-mode toggle path) keeps the
         currently configured language untouched.
 
-        rewrite_mode: Left-Alt was held. Without a usable configuration the
+        rewrite_mode: Left-Alt or Left-Ctrl was held. Left-Ctrl additionally
+        forces terminal mode (no HTML, Ctrl+Shift+V). Without a usable configuration the
         session runs as ordinary dictation after an error tone. In rewrite
         mode `language` is only the language to write in (Left-Shift:
         English); recognition keeps the configured language (-l), so Dutch
@@ -1709,7 +1792,7 @@ class App():
             spoken = getattr(getattr(self, 'args', None), 'language', None)
         session = self.Session(self.transcription_queue, self.typing_queue, self.ledger,
                                None, previous, spoken, None, rewrite=rewrite_mode,
-                               output_language=language)
+                               output_language=language, terminal_mode=bool(keys and keys.get('ctrl')))
         self.session = session
         start_meta = dict(language='unchanged' if spoken is _UNSET else spoken or 'auto')
         if rewrite_mode:
@@ -1717,7 +1800,7 @@ class App():
         if keys:
             start_meta['keys'] = keys
         diagnostic('session_start', max_seconds=MAX_SECONDS, pcm_bytes_per_minute=RATE*2*60,
-                   rewrite=rewrite_mode, **start_meta)
+                   rewrite=rewrite_mode, mode=session.mode, **start_meta)
         # Create fresh recorder and start BEFORE beep so no audio is missed
         self.recorder = StreamingRecorder(
             self.transcription_queue,
@@ -2015,7 +2098,8 @@ class App():
         result = rewrite.rewrite(raw, None if output is _UNSET else output,
                                  session.context, getattr(self, 'rewrite_config', None),
                                  getattr(self, 'rewrite_reason', None),
-                                 spoken=spoken if isinstance(spoken, str) else None)
+                                 spoken=spoken if isinstance(spoken, str) else None,
+                                 rich=not getattr(session, 'terminal_mode', False))
         text = result.text
         if status:
             text = text + '\n\n' + '\n'.join(status)
@@ -2023,13 +2107,19 @@ class App():
         if wid is not None:
             self.replayer.target_wid = wid
         try:
-            delivery = self.replayer.type_text(text, echo=False, rewrite_mode=True)
+            html = result.html if result.ok else None
+            if html and status:
+                import rich_text
+                html += rich_text.literal_paragraphs('\n'.join(status))
+            delivery = self.replayer.type_text(
+                text, echo=False, rewrite_mode=True, html=html,
+                terminal_mode=getattr(session, 'terminal_mode', False))
         except Exception as exc:
-            delivery = dict(ok=False, path='exception', error=str(exc))
+            delivery = dict(ok=False, path='exception', error=type(exc).__name__)
         diagnostic('rewrite_delivery', rewritten=result.ok,
                    paste_window='stop' if session.paste_wid else 'start',
                    **{k: v for k, v in (delivery or {}).items() if k != 'text'})
-        self.beep('rewrite_done' if result.ok else 'rewrite_failed', wait=False)
+        self.beep('rewrite_done' if result.ok and (delivery or {}).get('ok') else 'rewrite_failed', wait=False)
 
     def _typing_session(self, session):
         first_chunk = True
@@ -2046,6 +2136,8 @@ class App():
                             nonlocal first_chunk
                             prefix = '' if first_chunk else ' '
                             first_chunk = False
+                            if getattr(session, 'terminal_mode', False):
+                                return self.replayer.type_text(prefix + correction, terminal_mode=True)
                             return self.replayer.type_text(prefix + correction)
                         ledger.finish(
                             lambda audio: self.transcription_worker.transcribe_chunk(audio, recovery=True),
@@ -2078,7 +2170,8 @@ class App():
                     text = ' ' + text
 
             try:
-                result = self.replayer.type_text(text)
+                result = (self.replayer.type_text(text, terminal_mode=True)
+                          if getattr(session, 'terminal_mode', False) else self.replayer.type_text(text))
             except Exception as exc:
                 result = dict(ok=False, path='exception', error=str(exc))
             if entry is not None:

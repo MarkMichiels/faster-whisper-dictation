@@ -30,6 +30,8 @@ class NoEnterTests(unittest.TestCase):
         obj._restore_target_window = Mock(return_value=focus_ok)
         obj._get_active_window_class = Mock(return_value=window)
         obj._set_clipboard = Mock(return_value=dict(ok=clipboard_ok, path='fake'))
+        obj._clipboard_owned = Mock(return_value=True)
+        obj._delivery_alert = Mock()
         return obj
 
     def paste(self, obj, text, **kwargs):
@@ -50,11 +52,11 @@ class NoEnterTests(unittest.TestCase):
             self.paste(obj, 'first' + SEPARATORS + 'second', rewrite_mode=True, echo=False)
             obj._set_clipboard.assert_called_once_with('first second')
 
-    def test_rewrite_gui_preserves_paragraphs_and_normalizes_cr(self):
+    def test_rewrite_gui_plain_mime_is_always_single_line(self):
         obj = self.replayer()
         self.paste(obj, 'Dear reader,\r\n\r\nBody\rEnd\n\nCheck',
                    rewrite_mode=True, echo=False)
-        obj._set_clipboard.assert_called_once_with('Dear reader,\n\nBody\nEnd\n\nCheck')
+        obj._set_clipboard.assert_called_once_with('Dear reader, Body End Check')
 
     def test_default_is_safe_for_correction_and_check_lines(self):
         for text in [' correction\ncontinued', '\n\n[check]\r\nchecked']:
@@ -66,12 +68,14 @@ class NoEnterTests(unittest.TestCase):
     def test_new_journal_event_is_metadata_only(self):
         obj = self.replayer('kitty')
         self.paste(obj, 'private\r\n\nwords', rewrite_mode=True, echo=False)
-        self.assertEqual(self.events, [('paste_line_safety', dict(
-            flattened_line_breaks=3, terminal=True))])
+        self.assertEqual(self.events[0], ('paste_line_safety', dict(
+            flattened_line_breaks=3, terminal=True)))
+        self.assertNotIn('private', repr(self.events))
+        self.assertEqual(self.events[-1][1]['ownership'], 'matched')
         obj = self.replayer()
         self.paste(obj, 'private\rwords', rewrite_mode=True, echo=False)
-        self.assertEqual(self.events[-1], ('paste_line_safety', dict(
-            flattened_line_breaks=0, terminal=False)))
+        self.assertEqual(self.events[-2], ('paste_line_safety', dict(
+            flattened_line_breaks=1, terminal=False)))
 
     def test_only_paste_shortcut_keys_even_on_failure(self):
         for terminal in (False, True):

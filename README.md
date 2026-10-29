@@ -60,7 +60,8 @@ fork's agreed snapshot**, not just the upstream repository linked above.
 | Start | Double-tap **Right Ctrl** (within 0.3 seconds) |
 | Stop recording | Tap **Right Ctrl** once |
 | Start in the alternate language | Hold **Left Shift** while double-tapping Right Ctrl |
-| Rewrite mode (optional, needs configuration) | Also hold **Left Alt**; see [Rewrite mode](docs/rewrite_mode.md) |
+| Rich AI rewrite (optional, needs configuration) | Hold **Left Alt**; add **Left Shift** for English |
+| Plain AI rewrite / terminal paste | Hold **Left Ctrl** (wins over Alt); add **Left Shift** for English. See [Rewrite mode](docs/rewrite_mode.md) |
 | Start/stop by mouse | Press either configured thumb button |
 | Automatic stop | After about 10 seconds of detected silence |
 

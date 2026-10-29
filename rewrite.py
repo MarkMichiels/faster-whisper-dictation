@@ -1,6 +1,6 @@
 """Rewrite mode: turn one finished dictation into concise written text.
 
-One call to an OpenAI-compatible chat endpoint (standard library only), with a
+One call to an OpenAI-compatible chat endpoint (standard-library HTTP), with a
 hard total time-out, a JSON-schema answer and a plausibility check. Any failure
 returns the raw text with a reason; the caller pastes that instead.
 
@@ -32,6 +32,7 @@ rewrite.env EnvironmentFile still supplies such variables:
 from __future__ import annotations
 
 import json
+import rich_text
 import os
 import re
 import threading
@@ -237,9 +238,16 @@ def word_count(text: str) -> int:
     return len(text.split())
 
 
-def system_prompt(language: Optional[str], config: RewriteConfig, words: int) -> str:
+def system_prompt(language: Optional[str], config: RewriteConfig, words: int, rich: bool = False) -> str:
     english = language == 'en'
     prompt = PROMPT_EN if english else PROMPT_NL
+    if rich:
+        original = ('Plain text, paragraphs separated by a blank line, no Markdown.' if english else
+                    "Platte tekst, alinea's gescheiden door een lege regel, geen Markdown.")
+        prompt = prompt.replace(original,
+            'Only in the body field, use limited Markdown: paragraphs, bullet and numbered lists, '
+            'and **bold**. No HTML, links, images, headings, code or other markup. '
+            'Greeting and closing fields remain plain text.')
     if config.word_factor and words > LONG_WORDS:
         limit = max(1, round(config.word_factor * words))
         anchor = _EN_SHRINK if english else _NL_SHRINK
@@ -262,7 +270,7 @@ def system_prompt(language: Optional[str], config: RewriteConfig, words: int) ->
 
 
 def build_messages(raw: str, language: Optional[str], context: Optional[str],
-                   config: RewriteConfig) -> tuple[list[dict[str, str]], str]:
+                   config: RewriteConfig, rich: bool = False) -> tuple[list[dict[str, str]], str]:
     """System = task, user = context and dictation, clearly delimited."""
     english = language == 'en'
     tag = 'dictation' if english else 'dictaat'
@@ -272,7 +280,7 @@ def build_messages(raw: str, language: Optional[str], context: Optional[str],
     else:
         parts.append('There is no context.' if english else 'Er is geen context.')
     parts.append('<%s>\n%s\n</%s>' % (tag, raw, tag))
-    return ([{'role': 'system', 'content': system_prompt(language, config, word_count(raw))},
+    return ([{'role': 'system', 'content': system_prompt(language, config, word_count(raw), rich)},
              {'role': 'user', 'content': '\n\n'.join(parts)}],
             'text' if english else 'tekst')
 
@@ -443,12 +451,13 @@ class RewriteResult:
     text: str
     ok: bool
     reason: Optional[str] = None
+    html: Optional[str] = None
 
 
 def rewrite(raw: str, language: Optional[str], context: Optional[str],
             config: Optional[RewriteConfig], config_reason: Optional[str] = None,
             call: Optional[Callable[[RewriteConfig, dict[str, Any], float], dict[str, Any]]] = None,
-            spoken: Optional[str] = None) -> RewriteResult:
+            spoken: Optional[str] = None, rich: bool = False) -> RewriteResult:
     """Rewrite raw text; on any failure return the raw text with a reason.
 
     language is the language to write in ('en' selects the English prompt,
@@ -469,7 +478,7 @@ def rewrite(raw: str, language: Optional[str], context: Optional[str],
         diagnostic('rewrite_failed', reason=unavailable, **meta)
         return RewriteResult(raw, False, unavailable)
     meta['model'] = config.model
-    messages, field = build_messages(raw, language, context, config)
+    messages, field = build_messages(raw, language, context, config, rich)
     body = {
         'model': config.model,
         'messages': messages,
@@ -500,6 +509,13 @@ def rewrite(raw: str, language: Optional[str], context: Optional[str],
         if not isinstance(answer, dict) or not isinstance(answer.get(field), str):
             raise RewriteError('invalid_json')
         body = tidy(answer[field])
+        html = None
+        if rich:
+            try:
+                body, body_html = rich_text.render(body)
+            except Exception:
+                raise RewriteError('render_failed')
+            answer = dict(answer, **{field: body})
         # The plausibility check judges the body only: an added greeting and
         # sign-off must not push a short email over the length bound.
         problem = check_answer(raw, body)
@@ -507,6 +523,17 @@ def rewrite(raw: str, language: Optional[str], context: Optional[str],
         if blocked:
             meta['email_blocked'] = blocked
         out, is_email = compose(answer, field, config.signature, raw, plain=bool(blocked))
+        if rich:
+            # Compose mail parts through the same gate/name rules, but render
+            # those fields literally: only the body may contain Markdown.
+            marker = '\x00BODY\x00'
+            shell, _ = compose(dict(answer, **{field: marker}), field,
+                               config.signature, raw, plain=bool(blocked))
+            if shell.count(marker) != 1:
+                raise RewriteError('render_failed')
+            before, after = shell.split(marker)
+            html = rich_text.literal_paragraphs(before) + body_html + rich_text.literal_paragraphs(after)
+            out = rich_text.single_line(out)
         usage = data.get('usage') or {}
         meta.update(seconds=round(time.monotonic() - t0, 3), provider=data.get('provider'),
                     tokens_in=usage.get('prompt_tokens'), tokens_out=usage.get('completion_tokens'),
@@ -523,4 +550,4 @@ def rewrite(raw: str, language: Optional[str], context: Optional[str],
         diagnostic('rewrite_failed', reason='exception', error=type(exc).__name__, **meta)
         return RewriteResult(raw, False, 'exception')
     diagnostic('rewrite_outcome', result='rewritten', **meta)
-    return RewriteResult(out, True)
+    return RewriteResult(out, True, html=html)

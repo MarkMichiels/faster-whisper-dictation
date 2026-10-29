@@ -8,11 +8,22 @@ Ordinary dictation never contacts a language model.
 
 ## Use
 
-| Action | Control |
+Hold the modifiers at the **second** Right Ctrl tap (streaming mode):
+
+| Held modifiers | Result |
 |---|---|
-| Rewrite in Dutch (Belgian Dutch) | Hold **Left Alt** while double-tapping Right Ctrl |
-| Rewrite in English | Hold **Left Shift + Left Alt** while double-tapping Right Ctrl |
-| Stop | Tap Right Ctrl once, as usual (or the silence auto-stop) |
+| None | Ordinary dictation, default language, one plain line, no AI |
+| Left Shift | Ordinary English dictation, one plain line, no AI |
+| Left Alt | AI rewrite, Dutch, rich HTML plus one-line plain alternative |
+| Left Alt + Left Shift | AI rewrite, English, rich HTML plus one-line plain alternative |
+| Left Ctrl | AI rewrite, Dutch, one plain line, forced Ctrl+Shift+V |
+| Left Ctrl + Left Shift | AI rewrite, English, one plain line, forced Ctrl+Shift+V |
+| Left Ctrl + Left Alt | Same as Left Ctrl: terminal mode wins, no HTML |
+| Left Ctrl + Left Alt + Left Shift | Same as Left Ctrl + Left Shift |
+
+Stop with one Right Ctrl tap, as usual (or silence auto-stop). Modifiers at
+stop cannot change the mode saved at start. Left Ctrl uses vk 65507; the
+Right Ctrl trigger uses vk 65508. Left Ctrl events never count as taps.
 
 The mouse thumb buttons always start ordinary dictation. Right Alt (AltGr) is
 not used. Shift and Alt may be pressed in either order; both must be held at
@@ -21,7 +32,7 @@ the second tap.
 **English output from Dutch speech.** In rewrite mode Left Shift selects only
 the language of the *result*. Recognition keeps the configured language
 (`-l`, Dutch by default), so you dictate in Dutch and the model writes the text
-in English. Ordinary dictation with Left Shift (no Alt) is unchanged: it still
+in English. Ordinary dictation with Left Shift (no Alt or Left Ctrl) is unchanged: it still
 starts English recognition.
 
 Typical flow for a reply:
@@ -39,26 +50,49 @@ Sounds:
 | Start sound twice | Rewrite mode, no reply context captured |
 | Start sound twice + high pip | Rewrite mode with reply context |
 | Short mid tone after stop | Rewritten text pasted |
-| Two low tones after stop | Rewrite failed: the raw dictation was pasted instead |
+| Two low tones | Rewrite failure (raw text fallback), unavailable rich clipboard (plain fallback), or refused clipboard ownership check (no paste) |
 | Two low tones, then start sound | Rewrite mode is not configured: ordinary dictation runs |
 
 ## Paste safety
 
-The app sends only the paste shortcut, never Return or keypad Enter. Ordinary
-dictation, including corrections and check lines, replaces line-separator runs
-with one space. Rewrite mode preserves paragraphs in GUI windows, normalizing
-CRLF and CR to LF. In recognized terminal windows it also replaces all line
-separators with spaces, including separators in the appended check line and in
-raw fallback text. This avoids executing lines in terminals without bracketed
-paste. CopyQ's raw recovery history remains unchanged; manually pasting that
-history is outside this safeguard.
+The app sends only the paste shortcut, never Enter or Shift+Enter. **Every
+`text/plain` payload is one line**, including corrections, check lines and raw
+fallbacks. All Python line separators (CR, LF, VT, FF, U+001C–U+001E, NEL,
+U+2028, U+2029) become spaces. Ordinary and explicit terminal modes never offer
+HTML. Raw CopyQ recovery history is unchanged; manually pasting that history
+is outside this safeguard.
 
-Terminal detection uses the active window's class and the configured extra
-terminal classes (`output.extra_terminal_classes`). An unknown or undetectable terminal
-is treated as a GUI window: add its class before using rewrite mode there.
-`paste_line_safety` logs only `flattened_line_breaks` (separator characters,
-so CRLF counts as two) and `terminal`; it never includes the pasted text.
-Application-specific handling of pasted text is outside the app's control.
+Rich mode asks the model for limited Markdown in the JSON body, never HTML.
+`rich_text.py` parses it with markdown-it-py (raw HTML disabled), derives the
+visible plain text from the same tokens and emits only `p`, `ul`, `ol`, `li`,
+`strong`, `br`. All text is escaped; there are no attributes, active links,
+images, scripts or external resources. Link destinations are dropped and image
+alt text is kept. Unsupported blocks fail closed to raw single-line fallback.
+Greeting and sign-off become separate literal paragraphs; mail and name gates
+still apply. Word checks count visible body words, not markup.
+
+CopyQ first records final plain text in history, then `copyq copy` offers both
+`text/plain` and `text/html` together. The target app chooses; a plain field
+gets one line. If CopyQ fails, xclip offers only one-line plain text. Two low
+tones report lost formatting. No old HTML is reused on a following plain write.
+
+WM_CLASS and `output.extra_terminal_classes` choose **only the shortcut**:
+Ctrl+Shift+V for recognized terminals, Ctrl+V otherwise. Explicit Left Ctrl
+forces Ctrl+Shift+V even in an unknown terminal. Window detection never chooses
+line breaks or HTML permission.
+
+Immediately before the shortcut, the app reads back its MIME payload. The
+CopyQ path also checks a per-write owner marker and, for plain mode, absence of
+HTML; xclip checks the plain bytes. On mismatch or read error, it refuses the
+paste, sounds two low tones and leaves recovery history available. It never
+restores an older clipboard over a new writer. The check and the target's paste
+are not atomic: a small race remains after the last read. App-specific paste
+behaviour is not guaranteed by a successful shortcut receipt.
+
+`paste_line_safety` counts flattened separators (CRLF counts as two).
+`paste_delivery` adds only metadata: `mode` (`plain`, `rich`, `terminal`),
+`html_offered`, `ownership`, `shortcut`, focus/write/paste receipts. No new
+formatting or ownership record contains text.
 
 ## What happens at stop
 
@@ -79,8 +113,8 @@ Application-specific handling of pasted text is outside the app's control.
    Without context a dictated greeting is not enough. The model judges, and a
    check in code refuses an email outside these rules (journal:
    `email_blocked`, then only a dictated greeting or sign-off line is kept).
-   An email is built as a complete plain-text email: greeting, the text, sign-off and
-   the configured signature. A dictated greeting or sign-off is kept in its own
+   An email is built from greeting, the text, sign-off and the configured
+   signature, with separate greeting and sign-off HTML paragraphs in rich mode. A dictated greeting or sign-off is kept in its own
    words; otherwise "Beste <first name>," / "Dear <first name>," with the name
    from the dictation or the sender of the context email ("Beste," / "Hello,"
    without a name) and "Vriendelijke groeten," / "Best regards,". The signature
@@ -89,8 +123,9 @@ Application-specific handling of pasted text is outside the app's control.
    context) is dropped. In doubt,
    no greeting or sign-off is added. The length check in step 4 judges the text
    without greeting and sign-off.
-6. One paste. On any failure the raw text is pasted, without a marker in the
-   text, and the journal gets `rewrite_failed` with the reason.
+6. One paste attempt. On rewrite/render failure the raw text is flattened and
+   used instead, without a marker; `rewrite_failed` records the reason. Clipboard
+   ownership failure refuses the paste instead of pasting another writer's data.
 7. A range that could not be found back still adds the `[Controle: …]` line
    after the text; it is never sent to the model.
 
@@ -121,6 +156,20 @@ milliseconds on a test display); the limit bounds cost and waiting time, which
 grow with the context.
 
 ## Configure
+
+Rich rendering needs `markdown-it-py==3.0.0` (listed in requirements.txt).
+When upgrading an existing installation, install it explicitly **before** the
+service restart; `install.sh` installs requirements only for a newly created
+venv, not an existing one:
+
+```sh
+venv/bin/python -m pip install 'markdown-it-py==3.0.0'
+venv/bin/python -m unittest discover -s tests
+./install.sh  # only without a recording or a session still finishing
+```
+
+Without the parser, rich rewrites fail closed to raw single-line text and the
+failure tone. Ordinary and terminal dictation do not load the parser.
 
 Settings go in `~/.config/faster-whisper-dictation/config.yaml` (see
 [Configuration](configuration.md)). Example `rewrite:` section, no secrets in it:
@@ -169,7 +218,7 @@ ignore these fields.
 
 After editing the file, restart the service at a moment without a recording.
 Without the file, or with an incomplete one, the service starts normally and
-logs `Rewrite mode: not available (<reason>)`; a Left-Alt start then logs
+logs `Rewrite mode: not available (<reason>)`; a Left-Alt or Left-Ctrl start then logs
 `rewrite_unavailable` and dictates as usual.
 
 ## Privacy
@@ -180,14 +229,17 @@ the rewritten text or the context, only metadata: `rewrite_context` (source,
 characters sent and before shortening, age, truncation, refusal reasons), `rewrite_outcome` (model,
 provider, seconds, tokens, cost, word ratio, output and spoken language, whether an email was built
 or refused) or `rewrite_failed` (reason). `session_start` records the recognition language,
-the output language (rewrite mode) and the Shift/Alt state at the second tap (held, for how long, or
+the output language (rewrite mode), selected mode, and the Shift/Alt/Left-Ctrl state at the second tap (held, for how long, or
 how long ago released). The
 raw dictation is still logged by the ordinary `DCT-COVERAGE` records, as in
 ordinary dictation. CopyQ history receives both the raw and the pasted text.
 
 ## Tests
 
-`tests/test_rewrite.py` covers the key combinations, the held-then-paste-once
+`tests/test_formatting.py` covers the complete eight-row modifier table,
+Markdown escaping/tag whitelist, double MIME, clipboard replacement/read errors,
+xclip degradation and session modes. All desktop subprocesses and keys are mocked.
+`tests/test_rewrite.py` covers the held-then-paste-once
 flow, in-place recovery, every fallback reason, session ordering, the context
 rules and the absence of rewritten text, context and key in captured output. It
 uses fake key events, a fake xclip/probe, a fake LLM and a fake paste; it never

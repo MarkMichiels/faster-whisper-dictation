@@ -39,7 +39,8 @@ recognition, this source adds:
 | `dictation.py` | CLI; normal and batch apps; audio/VAD threads; model worker; triggers; clipboard and focus handling |
 | `coverage_ledger.py` | RAM samples, contiguous outcome ranges, numeric audio statistics, bounded stop recovery, corrections and JSON diagnostics |
 | `settings.py` | One settings file (`config.yaml`): schema with defaults, validation, precedence (CLI > `DICTATION_REWRITE_*` > YAML > code), journal of sources without values, `rewrite.env` migration; see [Configuration](configuration.md) |
-| `rewrite.py` | Optional rewrite mode: configuration from the merged settings, prompt, one chat-completions call (stdlib), answer check and raw-text fallback |
+| `rewrite.py` | Optional rich or plain-terminal rewrite: merged settings, one chat-completions call (stdlib), JSON/mail/visible-word checks and raw-text fallback |
+| `rich_text.py` | Restricted Markdown token renderer (markdown-it-py, raw HTML off): escaped tag whitelist, same-tree plain text, literal mail paragraphs; never active links or resources |
 | `context_capture.py` | Optional rewrite mode: one-time PRIMARY/CLIPBOARD reply-context capture with age, origin and secret checks |
 | `install.sh` | Render/install/check the systemd user unit; creates `config.yaml` once with a GPU/Dutch profile, never overwrites it; optional rewrite environment file |
 | `free_mouse_thumb_buttons.sh` | Map buttons 8/9 to 10/11 on suitable physical X pointers |

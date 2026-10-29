@@ -75,6 +75,12 @@ secret and may be readable by others.
 
 ## What is deliberately not configurable
 
+Formatting is a per-session key choice, not a setting: Left Alt requests rich
+AI rewriting; Left Ctrl requests one-line plain AI rewriting and wins over Alt.
+Left Shift selects English. Ordinary dictation remains one-line plain without
+AI. All plain MIME payloads are flattened, independent of window detection.
+See the full [key table and clipboard safety rules](rewrite_mode.md#use).
+
 Audio formats (16 kHz, 512/1024 frames), helper-program time-outs, the recovery
 heuristics, the voice-activity and level thresholds, prompts and the silence
 artefact list stay in the code. So do the safety and privacy gates: the secret
@@ -137,7 +143,9 @@ Notes:
   `keys.key_combo` at `null` keep the platform defaults (`<ctrl_r>` on Linux).
 - `output.extra_terminal_classes` adds window classes to the built-in terminal
   list (kitty, gnome-terminal, konsole, xterm, alacritty, terminator, st,
-  wezterm, tilix, urxvt, rxvt); it never replaces it.
+  wezterm, tilix, urxvt, rxvt); it never replaces it. It selects only the paste
+  shortcut, never line breaks or HTML. Left Ctrl explicitly forces terminal
+  paste (Ctrl+Shift+V), including for unknown terminals.
 - Sound paths and the rewrite file paths may start with `~`.
 - `rewrite.signature` may be a multi-line YAML string; each line goes on its own
   line under the sign-off.

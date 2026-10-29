@@ -407,6 +407,8 @@ class CoverageTests(unittest.TestCase):
         obj = cls.__new__(cls)
         obj._get_active_window_class = lambda: 'editor'
         obj._set_clipboard = lambda t: dict(ok=True, path='copyq')
+        obj._clipboard_owned = lambda *a: True
+        obj._delivery_alert = lambda: self.fail('unexpected alert')
         obj._restore_target_window = lambda: False
         obj._send_paste = lambda terminal: self.fail('must not paste without focus')
         self.assertFalse(obj.type_text('woorden')['ok'])

@@ -83,7 +83,7 @@ class FakeReplayer:
         self.events.append(('history', text))
         return 0
 
-    def type_text(self, text, echo=True, rewrite_mode=False):
+    def type_text(self, text, echo=True, rewrite_mode=False, html=None, terminal_mode=False):
         if not echo:
             assert rewrite_mode, 'rewrite delivery must explicitly preserve GUI paragraphs'
         if echo:
@@ -143,7 +143,6 @@ class KeyTests(unittest.TestCase):
             listener.on_press(k)
         for _ in range(2):
             listener.on_press(CTRL_R)
-            listener.on_press(CTRL)  # pynput's generic duplicate event
             listener.on_release(CTRL_R)
         for k in held:
             listener.on_release(k)
@@ -164,7 +163,7 @@ class KeyTests(unittest.TestCase):
                                   ('nl', False)])
         keys = [c[2] for c in calls if c != 'stop']
         self.assertEqual({k: v for k, v in keys[2].items() if not k.endswith('_s')},
-                         {'shift': True, 'alt': True})
+                         {'shift': True, 'alt': True, 'ctrl': False})
         self.assertIn('shift_held_s', keys[2])
         self.assertIn('alt_released_s_ago', keys[3])
 
@@ -363,7 +362,7 @@ class RestartTests(unittest.TestCase):
                 return 'tekst %s met een paar woorden' % name
 
         class Replayer(FakeReplayer):
-            def type_text(self, text, echo=True, rewrite_mode=False):
+            def type_text(self, text, echo=True, rewrite_mode=False, html=None, terminal_mode=False):
                 events.append('paste %s @%s' % (text.strip(), self.target_wid))
                 return dict(ok=True, path='copyq')
             def add_to_history(self, text):
@@ -907,7 +906,7 @@ class SourceTests(unittest.TestCase):
         unit = installer[installer.index('render_service() {'):installer.index('unit_is_current() {')]
         self.assertIn('EnvironmentFile=-%h/.config/faster-whisper-dictation/rewrite.env', unit)
 
-    def test_no_personal_paths_or_new_dependencies(self):
+    def test_no_personal_paths_and_bounded_imports(self):
         for name in ('rewrite.py', 'context_capture.py', 'tests/test_rewrite.py'):
             source = (ROOT / name).read_text()
             self.assertNotIn('/' + 'home/', source)
@@ -919,7 +918,7 @@ class SourceTests(unittest.TestCase):
                         if isinstance(n, ast.ImportFrom) and n.module}
             self.assertLessEqual(modules, {'__future__', 'json', 'os', 're', 'threading', 'time', 'urllib',
                                            'dataclasses', 'typing', 'coverage_ledger', 'context_capture', 'subprocess', 'sys',
-                                           'select', 'Xlib'})
+                                           'select', 'Xlib', 'rich_text'})
 
 
 if __name__ == '__main__':
