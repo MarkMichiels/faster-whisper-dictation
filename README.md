@@ -3,7 +3,8 @@
 Dictate into a desktop text field using local speech recognition. A keyboard
 trigger or mouse thumb button starts the microphone; speech is decoded in
 chunks and pasted into the window where dictation started. You do not need a
-cloud transcription account.
+cloud transcription account. An optional, separately configured rewrite mode
+sends one finished dictation to a language model; it is off by default.
 
 This fork builds on [doctorguile/faster-whisper-dictation](https://github.com/doctorguile/faster-whisper-dictation),
 [faster-whisper](https://github.com/SYSTRAN/faster-whisper) and
@@ -43,6 +44,8 @@ CPU inference is selectable, but equal speed or desktop parity is not promised.
    the additions, stop checks and known limits.
 3. [Privacy, offline tests and diagnosis](docs/privacy_testing.md): what remains
    on disk, safe verification and troubleshooting.
+4. [Rewrite mode](docs/rewrite_mode.md): optional rewriting of one dictation into
+   concise written text by a configured language model (cloud or local).
 
 These documents travel with a source-only copy: they do not require the fork's
 Git history, local evidence files or a private setup repository. Obtain **this
@@ -55,6 +58,7 @@ fork's agreed snapshot**, not just the upstream repository linked above.
 | Start | Double-tap **Right Ctrl** (within 0.3 seconds) |
 | Stop recording | Tap **Right Ctrl** once |
 | Start in the alternate language | Hold **Left Shift** while double-tapping Right Ctrl |
+| Rewrite mode (optional, needs configuration) | Also hold **Left Alt**; see [Rewrite mode](docs/rewrite_mode.md) |
 | Start/stop by mouse | Press either configured thumb button |
 | Automatic stop | After about 10 seconds of detected silence |
 

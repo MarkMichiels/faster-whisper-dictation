@@ -5,6 +5,8 @@
 ## Privacy and retention
 
 Recognition runs locally; there is no transcription-service API in this app.
+The optional [rewrite mode](rewrite_mode.md) is the one exception that can send
+text off the machine, and only when explicitly configured.
 That does **not** make the entire setup network-isolated or text-free on disk.
 Package/model acquisition may use the network. The application does not create
 an audio archive or write microphone audio files; streaming capture retains PCM
@@ -19,6 +21,7 @@ mode is a separate path without the ledger's release lifecycle.
 | Current transcript | Intended text application and system clipboard; each new block replaces clipboard content |
 | CopyQ history | Explicit `add` plus `copy` calls; history can survive logout/restart depending on CopyQ settings; history limits may evict older items |
 | Console/journal | Recognition text, rejected artefacts, errors, range diagnostics and corrections; retention depends on system journal configuration |
+| Rewrite mode (optional) | Dictation and captured reply context are sent to the configured endpoint; the journal gets metadata only, never the rewritten text or the context. See [Rewrite mode](rewrite_mode.md#privacy) |
 
 **`DCT-COVERAGE` is not metadata-only.** Its JSON can include full `text`, `raw`,
 recovered text and quoted correction anchors, as well as times, sample ranges,

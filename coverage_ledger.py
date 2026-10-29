@@ -151,6 +151,11 @@ def stop_status(checked: int, corrected: int, unresolved: int, seconds: float,
     return '[Controle: %s, %s]' % (', '.join(parts), took)
 
 
+# Delivery path of rewrite mode: the range is accepted and kept in the session
+# until stop, then rewritten and pasted once.
+HELD_FOR_REWRITE = 'held_for_rewrite'
+
+
 class CoverageLedger:
     def __init__(self) -> None:
         self.frames = []
@@ -211,7 +216,8 @@ class CoverageLedger:
     def delivered(self, entry: dict[str, Any], result: dict[str, Any]) -> None:
         entry['delivery'] = dict(result, at=time.time())
         diagnostic('delivery', start=entry['start'], end=entry['end'], **entry['delivery'])
-        if not result.get('ok') or result.get('path') != 'copyq':
+        # Rewrite mode holds text until stop on purpose; that is not degraded.
+        if not result.get('ok') or result.get('path') not in ('copyq', HELD_FOR_REWRITE):
             self.incident('delivery_degraded', start=entry['start'], result=result)
 
     def _failed_delivery(self, e: dict[str, Any]) -> bool:
@@ -259,16 +265,41 @@ class CoverageLedger:
         own = self.entries[i]['text'] if _delivered(self.entries[i]) else ''
         return ' '.join(t for t in (before, own, after) if t)
 
+    def ordered_text(self) -> str:
+        """Rewrite mode: all accepted text in range order, recovered text in place.
+
+        A range contributes its held text, followed by recovered text that is
+        new (not a duplicate of what was already held). A range that only
+        failed contributes its recovered text where the gap was, never as a
+        [Correctie] at the end.
+        """
+        parts = []
+        for e in self.entries:
+            recovery = e['recovery'] or {}
+            held = e['text'] if _delivered(e) else ''
+            found = recovery.get('text') or ''
+            if held:
+                parts.append(held.strip())
+            if found and not recovery.get('duplicate') and found.strip() != held.strip():
+                parts.append(found.strip())
+        text = ' '.join(p for p in parts if p)
+        return re.sub(r'\s+([,.;:!?])', r'\1', re.sub(r'[ \t]+', ' ', text)).strip()
+
     def finish(self, decode: Callable[[np.ndarray], str],
                deliver: Callable[[str], dict[str, Any]],
                is_artifact: Optional[Callable[[str], bool]] = None,
-               discard_recovery: Optional[Callable[[str, dict[str, Any]], Optional[str]]] = None) -> list[str]:
+               discard_recovery: Optional[Callable[[str, dict[str, Any]], Optional[str]]] = None,
+               inline: bool = False) -> list[str]:
         """Called after original delivery queue drains.
 
         Retry each suspect exactly once, in <=10s windows. Corrections are
         pasted through the ordinary chunk path (`deliver`), after the text that
         was already pasted; earlier text is never edited. No audio retained
         after return.
+
+        inline=True (rewrite mode): recovered text is not delivered as a
+        [Correctie]; it stays on its range for ordered_text(). Only the check
+        line is delivered, and only when a range could not be found back.
         """
         t0 = time.perf_counter()
         corrections = []
@@ -328,7 +359,7 @@ class CoverageLedger:
                 except Exception as exc:
                     e['recovery'] = dict(error=str(exc), at=time.time())
                     self.incident('recovery_failed', start=e['start'], error=str(exc))
-            for entries, correction in self._corrections(recovered_texts):
+            for entries, correction in ([] if inline else self._corrections(recovered_texts)):
                 try:
                     result = deliver(correction)
                 except Exception as exc:
@@ -340,6 +371,8 @@ class CoverageLedger:
                 # Full text stays in the journal, also when the paste failed.
                 diagnostic('correction_delivery', start=entries[0]['start'], end=entries[-1]['end'],
                            correction=correction, **dict(result, at=time.time()))
+            if inline and recovered_texts:
+                diagnostic('corrections_inline', ranges=len(recovered_texts))
             unresolved = self._unresolved(targets)
             if STOP_STATUS and (corrections or unresolved):
                 status = stop_status(len(targets), len(corrections), unresolved,
@@ -352,6 +385,7 @@ class CoverageLedger:
                 diagnostic('stop_status_delivery', status=status, **dict(result, at=time.time()))
             diagnostic('stop_summary', samples=self.samples, ranges=len(self.entries),
                        suspects=len(targets), corrections=len(corrections),
+                       inline_corrections=len(recovered_texts) if inline else 0,
                        unresolved_ranges=self._unresolved(targets),
                        silent_ranges=sum(bool((e['recovery'] or {}).get('silent')) for e in targets),
                        duplicate_ranges=sum(bool((e['recovery'] or {}).get('duplicate')) for e in targets),

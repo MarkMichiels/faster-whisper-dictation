@@ -14,7 +14,10 @@ from faster_whisper.vad import get_speech_timestamps, VadOptions, get_vad_model
 from pynput import keyboard
 from pynput import mouse
 from transitions import Machine
-from coverage_ledger import CoverageLedger, diagnostic, MAX_SECONDS, RATE, audio_stats, silent_audio
+from coverage_ledger import (CoverageLedger, diagnostic, MAX_SECONDS, RATE, audio_stats, silent_audio,
+                             HELD_FOR_REWRITE)
+import context_capture
+import rewrite
 
 # PortAudio paInputOverflowed: input samples were dropped by the driver.
 INPUT_OVERFLOWED_ERRNO = -9981  # pyaudio.paInputOverflowed
@@ -275,6 +278,42 @@ else:
     def loadwav(filename):
         data, fs = sf.read(filename, dtype='float32')
         return data
+
+
+def tone(frequency, ms, volume=0.25, channels=2, rate=44100):
+    """A short sine tone with soft edges, shaped like the loaded WAV files."""
+    n = int(rate * ms / 1000)
+    t = np.arange(n) / rate
+    wave = np.sin(2 * np.pi * frequency * t) * volume
+    edge = max(1, min(n // 4, int(rate * 0.005)))
+    ramp = np.linspace(0.0, 1.0, edge)
+    wave[:edge] *= ramp
+    wave[-edge:] *= ramp[::-1]
+    wave = wave.astype(np.float32)
+    return np.repeat(wave[:, None], channels, axis=1) if channels > 1 else wave
+
+
+def rewrite_sounds(start):
+    """Rewrite-mode cues built from the start sound plus synthetic tones.
+
+    start twice              rewrite mode, no reply context
+    start twice + high pip   rewrite mode with context
+    short mid tone           rewritten text pasted
+    two low tones            rewrite failed or unavailable: raw text pasted
+    """
+    channels = start.shape[1] if getattr(start, 'ndim', 1) > 1 else 1
+    def gap(ms):
+        return tone(1, ms, volume=0.0, channels=channels)
+    twice = np.concatenate([start, gap(60), start])
+    failed = np.concatenate([tone(330, 120, channels=channels), gap(60),
+                             tone(220, 200, channels=channels)])
+    return {
+        'rewrite_start': twice,
+        'rewrite_start_context': np.concatenate([twice, gap(60), tone(1320, 90, channels=channels)]),
+        'rewrite_done': tone(880, 80, channels=channels),
+        'rewrite_failed': failed,
+        'rewrite_unavailable': np.concatenate([failed, gap(80), start]),
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -917,11 +956,23 @@ class KeyboardReplayer():
         if failures:
             print('[pynput] %d/%d characters failed to type' % (failures, len(text)))
 
-    def type_text(self, text):
-        """Inject text into the active window, clipboard-first for every app."""
+    def add_to_history(self, text):
+        """Put text in CopyQ history only (no clipboard change, no paste)."""
+        try:
+            return subprocess.run(['copyq', 'add', '--', text], timeout=3, check=False,
+                                  stderr=subprocess.DEVNULL).returncode
+        except Exception as exc:
+            return type(exc).__name__
+
+    def type_text(self, text, echo=True):
+        """Inject text into the active window, clipboard-first for every app.
+
+        echo=False keeps the text out of stdout/the journal (rewrite mode).
+        """
         if not text:
             return
-        print(text)
+        if echo:
+            print(text)
         focus_ok = self._restore_target_window()
         wm_class = self._get_active_window_class()
         terminal = wm_class in self.TERMINAL_CLASSES
@@ -983,6 +1034,10 @@ class MultiTapKeyListener():
     The language is chosen at start time only; nothing is remembered between
     sessions. Right-Shift is deliberately ignored (name 'shift_r').
 
+    Left-Alt (momentary, no state kept): held while the double-tap fires →
+    activate_callback(language, True): rewrite mode for that session, in the
+    language chosen above. Right-Alt (AltGr, 'alt_gr'/'alt_r') is ignored.
+
     toggle_language_callback / language_key remain for backward compatibility
     (old stateful AltGr toggle) but are unused by default.
     """
@@ -1000,6 +1055,7 @@ class MultiTapKeyListener():
         self.default_language = default_language
         self.shift_language = shift_language
         self.shift_held = False
+        self.alt_held = False
         self.last_press_time = 0
         self.tap_count = 0
         self.lang_last_press_time = 0
@@ -1031,6 +1087,11 @@ class MultiTapKeyListener():
         if name in ('shift', 'shift_l'):
             self.shift_held = True
             return
+        # Left-Alt arrives as the generic name 'alt' (Alt_L), so it must be
+        # tracked before the generic-modifier skip below.
+        if name in ('alt', 'alt_l'):
+            self.alt_held = True
+            return
         # Skip generic modifier events (e.g. Key.ctrl vk=65507) that pynput
         # sends alongside the specific Key.ctrl_r/Key.ctrl_l events.
         # Without this, pressing Ctrl_R triggers both Key.ctrl_r AND Key.ctrl,
@@ -1049,7 +1110,10 @@ class MultiTapKeyListener():
 
             if self.tap_count == 2:
                 language = self.shift_language if self.shift_held else self.default_language
-                self.activate_callback(language)
+                if self.alt_held:
+                    self.activate_callback(language, True)
+                else:
+                    self.activate_callback(language)
             elif self.tap_count == 1:
                 self.deactivate_callback()
 
@@ -1071,6 +1135,8 @@ class MultiTapKeyListener():
         name = getattr(key, 'name', None)
         if name in ('shift', 'shift_l'):
             self.shift_held = False
+        elif name in ('alt', 'alt_l'):
+            self.alt_held = False
 
     def run(self):
         with keyboard.Listener(
@@ -1341,7 +1407,8 @@ class BatchApp():
     def beep(self, k, wait=True):
         playsound(self.SOUND_EFFECTS[k], wait=wait)
 
-    def start(self, language=_UNSET):
+    def start(self, language=_UNSET, rewrite_mode=False):
+        # Rewrite mode exists only in streaming mode; batch mode ignores it.
         if self.m.is_READY():
             if language is not _UNSET:
                 self.transcriber.language = language
@@ -1438,7 +1505,7 @@ class App():
         PREVIOUS_WAIT_S = 300
 
         def __init__(self, transcription_queue, typing_queue, ledger=None, recorder=None,
-                     previous=None, language=_UNSET, target_wid=None):
+                     previous=None, language=_UNSET, target_wid=None, rewrite=False):
             self.transcription_queue = transcription_queue
             self.typing_queue = typing_queue
             self.ledger = ledger
@@ -1446,6 +1513,14 @@ class App():
             self.previous = previous  # threading.Event of the previous session
             self.language = language
             self.target_wid = target_wid
+            # Rewrite mode: nothing is pasted during the session; at stop the
+            # full text is rewritten once and pasted into the window that is
+            # active at stop (paste_wid). context lives only in this object
+            # and is cleared when the session ends.
+            self.rewrite = rewrite
+            self.context = None
+            self.paste_wid = None
+            self.held = []
             self.done = threading.Event()
 
     def __init__(self, args):
@@ -1477,11 +1552,22 @@ class App():
             "start_recording": loadwav("assets/granted-04.wav"),
             "finish_recording": loadwav("assets/beepbeep.wav")
         }
+        self.SOUND_EFFECTS.update(rewrite_sounds(self.SOUND_EFFECTS["start_recording"]))
+
+        # Rewrite mode (Left-Alt + double tap). Optional; without configuration
+        # the hotkey falls back to ordinary dictation with a journal line.
+        self.rewrite_config, self.rewrite_reason = rewrite.load_config()
+        if self.rewrite_config:
+            print('Rewrite mode: model %s, time-out %gs.'
+                  % (self.rewrite_config.model, self.rewrite_config.timeout_s))
+        else:
+            print('Rewrite mode: not available (%s); Left-Alt sessions dictate normally.'
+                  % self.rewrite_reason)
 
     def beep(self, k, wait=True):
         playsound(self.SOUND_EFFECTS[k], wait=wait)
 
-    def start(self, language=_UNSET):
+    def start(self, language=_UNSET, rewrite_mode=False):
         """Begin a streaming dictation session.
 
         language: transcription language for THIS session, chosen at start
@@ -1489,9 +1575,20 @@ class App():
         the configured default). Set every session so nothing is remembered.
         None means auto-detect. _UNSET (combo-mode toggle path) keeps the
         currently configured language untouched.
+
+        rewrite_mode: Left-Alt was held. Without a usable configuration the
+        session runs as ordinary dictation after an error tone.
         """
         if self.active:
             return None
+        start_sound = 'start_recording'
+        if rewrite_mode:
+            unavailable = rewrite.availability(getattr(self, 'rewrite_config', None),
+                                               getattr(self, 'rewrite_reason', None))
+            if unavailable:
+                diagnostic('rewrite_unavailable', reason=unavailable)
+                rewrite_mode = False
+                start_sound = 'rewrite_unavailable'
 
         self.active = True
         previous = self.session.done if self.session is not None else None
@@ -1508,9 +1605,10 @@ class App():
         # a previous session that ends meanwhile must see it is no longer the
         # current one, or it would clear `active` while this one records.
         session = self.Session(self.transcription_queue, self.typing_queue, self.ledger,
-                               None, previous, language, None)
+                               None, previous, language, None, rewrite=rewrite_mode)
         self.session = session
-        diagnostic('session_start', max_seconds=MAX_SECONDS, pcm_bytes_per_minute=RATE*2*60)
+        diagnostic('session_start', max_seconds=MAX_SECONDS, pcm_bytes_per_minute=RATE*2*60,
+                   rewrite=rewrite_mode)
         # Create fresh recorder and start BEFORE beep so no audio is missed
         self.recorder = StreamingRecorder(
             self.transcription_queue,
@@ -1525,8 +1623,15 @@ class App():
         session.recorder = self.recorder
         self.recorder.start()
         session.target_wid = self.replayer.window_id()
+        if rewrite_mode:
+            # Read once, now: after the recorder (no audio lost) and before
+            # anything of this session pastes. Never read again.
+            context = context_capture.capture()
+            session.context = context.text
+            diagnostic('rewrite_context', **context.journal())
+            start_sound = 'rewrite_start_context' if context.text else 'rewrite_start'
 
-        self.beep("start_recording", wait=False)
+        self.beep(start_sound, wait=False)
         print('Recording (streaming mode) ...')
 
         # Start transcription and typing threads
@@ -1556,6 +1661,7 @@ class App():
         if self.timer is not None:
             self.timer.cancel()
             self.timer = None
+        self._fix_paste_window(getattr(self, 'session', None))
 
         # Stop recorder — this flushes remaining audio and sends sentinel
         self.recorder.stop()
@@ -1581,6 +1687,7 @@ class App():
         if self.timer is not None:
             self.timer.cancel()
             self.timer = None
+        self._fix_paste_window(getattr(self, 'session', None))
 
         self.recorder.stop()
         self.active = False
@@ -1590,6 +1697,12 @@ class App():
         print('Timer stop')
         self.ledger.incident('timer_stop')
         self._auto_stop()
+
+    def _fix_paste_window(self, session):
+        """Rewrite mode pastes where the focus is at stop, fixed from then on:
+        the reply field may be in another window than the selected text."""
+        if session is not None and getattr(session, 'rewrite', False) and session.paste_wid is None:
+            session.paste_wid = self.replayer.window_id()
 
     def toggle_language(self):
         """Toggle transcription language between nl and en."""
@@ -1728,10 +1841,82 @@ class App():
         if session is None:
             session = self._session_from_attributes()
         try:
-            self._typing_session(session)
+            if getattr(session, 'rewrite', False):
+                self._rewrite_session(session)
+            else:
+                self._typing_session(session)
         finally:
+            # Context is reply material for this one session only.
+            session.context = None
             # Release the next session even if this one failed.
             session.done.set()
+
+    def _rewrite_session(self, session):
+        """Rewrite mode: hold every range, run the ordinary stop check with
+        recovered text in place, keep the raw text in CopyQ, rewrite once,
+        paste once. Any rewrite failure pastes the raw text."""
+        ledger = session.ledger
+        status = []
+        while True:
+            item = session.typing_queue.get()
+            if item is None:
+                break
+            entry = None
+            if isinstance(item, tuple):
+                item, entry = item
+            session.held.append(item)
+            if entry is not None:
+                ledger.delivered(entry, dict(ok=True, path=HELD_FOR_REWRITE))
+        try:
+            if ledger:
+                def deliver(line):
+                    status.append(line)  # only the check line arrives here (inline)
+                    return dict(ok=True, path=HELD_FOR_REWRITE)
+                try:
+                    ledger.finish(
+                        lambda audio: self.transcription_worker.transcribe_chunk(audio, recovery=True),
+                        deliver, is_artifact=is_hallucination,
+                        discard_recovery=transcript_discard_reason, inline=True)
+                except Exception as exc:
+                    ledger.incident('stop_check_failed', error=str(exc))
+                finally:
+                    ledger.frames.clear()
+                    if session.recorder is not None:
+                        session.recorder._raw_frames.clear()
+                raw = ledger.ordered_text()
+            else:
+                raw = re.sub(r'\s+', ' ', ' '.join(t.strip() for t in session.held)).strip()
+            self._deliver_rewrite(session, raw, status)
+        finally:
+            session.held = []
+            if getattr(self, 'session', None) in (None, session):
+                self.active = False
+            print('Session ended.')
+
+    def _deliver_rewrite(self, session, raw, status):
+        if not raw:
+            diagnostic('rewrite_skipped', reason='no_text')
+            return
+        # Raw text first into CopyQ history, so it survives any later failure.
+        history = self.replayer.add_to_history(raw)
+        diagnostic('rewrite_raw_saved', copyq_add=history)
+        result = rewrite.rewrite(raw, None if session.language is _UNSET else session.language,
+                                 session.context, getattr(self, 'rewrite_config', None),
+                                 getattr(self, 'rewrite_reason', None))
+        text = result.text
+        if status:
+            text = text + '\n\n' + '\n'.join(status)
+        wid = session.paste_wid or session.target_wid
+        if wid is not None:
+            self.replayer.target_wid = wid
+        try:
+            delivery = self.replayer.type_text(text, echo=False)
+        except Exception as exc:
+            delivery = dict(ok=False, path='exception', error=str(exc))
+        diagnostic('rewrite_delivery', rewritten=result.ok,
+                   paste_window='stop' if session.paste_wid else 'start',
+                   **{k: v for k, v in (delivery or {}).items() if k != 'text'})
+        self.beep('rewrite_done' if result.ok else 'rewrite_failed', wait=False)
 
     def _typing_session(self, session):
         first_chunk = True
@@ -1813,7 +1998,7 @@ class App():
                 shift_language=self.args.shift_language,
             )
             print("Double tap %s to start/stop (language: %s). Hold Left-Shift + double tap to dictate in %s."
-                  % (key, self.args.language or 'auto-detect', self.args.shift_language))
+                  " Add Left-Alt for rewrite mode." % (key, self.args.language or 'auto-detect', self.args.shift_language))
         else:
             key = self.args.key_combo or '<win>+z'
             keylistener = KeyListener(self.toggle, normalize_key_names(key))

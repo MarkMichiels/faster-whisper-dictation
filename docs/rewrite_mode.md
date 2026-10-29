@@ -1,0 +1,135 @@
+[Home](../README.md) / Rewrite mode
+
+# Rewrite mode (optional, cloud LLM)
+
+Rewrite mode turns one finished dictation into concise written text, for
+example a reply to an email you have selected. It is **off unless configured**.
+Ordinary dictation never contacts a language model.
+
+## Use
+
+| Action | Control |
+|---|---|
+| Rewrite in Dutch (Belgian Dutch) | Hold **Left Alt** while double-tapping Right Ctrl |
+| Rewrite in English | Hold **Left Shift + Left Alt** while double-tapping Right Ctrl |
+| Stop | Tap Right Ctrl once, as usual (or the silence auto-stop) |
+
+The mouse thumb buttons always start ordinary dictation. Right Alt (AltGr) is
+not used.
+
+Typical flow for a reply:
+
+1. Select the text you reply to (dragging or double-clicking is enough; no copy).
+2. Start with Left Alt + double-tap. The selection is read **once**, now.
+3. Click into the reply field and dictate. Nothing is pasted while you speak.
+4. Stop. The text is rewritten once and pasted into the window that has focus
+   **at stop**; that window stays the target while the rewrite runs.
+
+Sounds:
+
+| Sound | Meaning |
+|---|---|
+| Start sound twice | Rewrite mode, no reply context captured |
+| Start sound twice + high pip | Rewrite mode with reply context |
+| Short mid tone after stop | Rewritten text pasted |
+| Two low tones after stop | Rewrite failed: the raw dictation was pasted instead |
+| Two low tones, then start sound | Rewrite mode is not configured: ordinary dictation runs |
+
+## What happens at stop
+
+1. The ordinary stop check runs. Text it recovers is placed **where the gap
+   was**, not appended as `[Correctie: …]`.
+2. The raw text goes into CopyQ history first (`copyq add`, no paste), so it
+   survives any later failure.
+3. One request to an OpenAI-compatible chat endpoint, with a JSON-schema
+   answer and a hard total time-out (default 30 s). A following session can
+   start meanwhile; it records at once and pastes after this one.
+4. The answer is checked: empty, more than 1.2x or fewer than 0.15x the raw
+   word count, an introduction ("Here is…"), a truncated or malformed answer all
+   count as failure. Quotes or a code fence around the whole answer are removed.
+5. One paste. On any failure the raw text is pasted, without a marker in the
+   text, and the journal gets `rewrite_failed` with the reason.
+6. A range that could not be found back still adds the `[Controle: …]` line
+   after the text; it is never sent to the model.
+
+## Reply context
+
+At start the app reads, in this order:
+
+- the X11 **PRIMARY** selection, if it is at most 5 minutes old;
+- else **CLIPBOARD**, if it is at most 2 minutes old and not written by CopyQ
+  (after an ordinary dictation the clipboard holds your own previous text).
+
+Age is the selection owner's `TIMESTAMP` against the X server clock; an owner
+without `TIMESTAMP` counts as too old. No context is taken when the selection
+carries a password-manager hint (`x-kde-passwordManagerHint`) or CopyQ's hidden
+flag, looks like a secret (private-key header, common API-key prefixes, one long
+token with digits), or is shorter than 20 characters. Longer than 8,000
+characters: the beginning is kept and `[ingekort]` is appended. The context lives
+only in memory for that session and is cleared when the session ends.
+
+## Configure
+
+The service unit reads an optional environment file:
+
+```
+EnvironmentFile=-%h/.config/faster-whisper-dictation/rewrite.env
+```
+
+Example `~/.config/faster-whisper-dictation/rewrite.env` (no secrets in it):
+
+```
+DICTATION_REWRITE_ENDPOINT=https://openrouter.ai/api/v1/chat/completions
+DICTATION_REWRITE_MODEL=deepseek/deepseek-v4.1-flash
+DICTATION_REWRITE_KEY_FILE=/path/to/a/file/holding/the/key.env
+DICTATION_REWRITE_TIMEOUT_S=30
+# Optional:
+# DICTATION_REWRITE_PROVIDER_ORDER=together,fireworks
+# DICTATION_REWRITE_STYLE_FILE=/path/to/rewrite_style.md
+# DICTATION_REWRITE_TERMS_FILE=/path/to/terms.txt
+# DICTATION_REWRITE_WORD_FACTOR=0.45
+```
+
+| Variable | Meaning |
+|---|---|
+| `DICTATION_REWRITE_ENDPOINT` | Chat-completions URL; `https://`, or plain `http://` only on loopback (e.g. a local Ollama) |
+| `DICTATION_REWRITE_MODEL` | Model id |
+| `DICTATION_REWRITE_KEY_FILE` | File with the API key, as `NAME=value` or a bare line. Only the path is configured; the key is read per request and never logged |
+| `DICTATION_REWRITE_TIMEOUT_S` | Hard total time-out, 1–120 s (default 30) |
+| `DICTATION_REWRITE_PROVIDER_ORDER` | Optional OpenRouter provider preference |
+| `DICTATION_REWRITE_STYLE_FILE` | Optional few lines of preferences, sent with every request |
+| `DICTATION_REWRITE_TERMS_FILE` | Optional term list the model must spell exactly |
+| `DICTATION_REWRITE_WORD_FACTOR` | Optional: for dictations above 120 words, ask for at most factor x words (default off) |
+
+Every request also sends `provider: {zdr: true, data_collection: "deny",
+require_parameters: true}` (OpenRouter: only zero-data-retention endpoints, no
+training use) and `reasoning: {enabled: false}`. Other OpenAI-compatible servers
+ignore these fields.
+
+After editing the file, restart the service at a moment without a recording.
+Without the file, or with an incomplete one, the service starts normally and
+logs `Rewrite mode: not available (<reason>)`; a Left-Alt start then logs
+`rewrite_unavailable` and dictates as usual.
+
+## Privacy
+
+With a cloud endpoint the dictation **and the captured reply context** (often
+someone else's text) leave the machine for the provider. The journal never gets
+the rewritten text or the context, only metadata: `rewrite_context` (source,
+characters, age, truncation, refusal reasons), `rewrite_outcome` (model,
+provider, seconds, tokens, cost, word ratio) or `rewrite_failed` (reason). The
+raw dictation is still logged by the ordinary `DCT-COVERAGE` records, as in
+ordinary dictation. CopyQ history receives both the raw and the pasted text.
+
+## Tests
+
+`tests/test_rewrite.py` covers the key combinations, the held-then-paste-once
+flow, in-place recovery, every fallback reason, session ordering, the context
+rules and the absence of rewritten text, context and key in captured output. It
+uses fake key events, a fake xclip/probe, a fake LLM and a fake paste; it never
+touches the real clipboard, CopyQ or the network.
+
+`python3 context_capture.py --probe` prints the selection metadata (owner,
+TARGETS, age; never text). With an explicit selection name, e.g.
+`--probe MY_TEST_SELECTION`, it can be checked against a private test selection
+without touching PRIMARY or CLIPBOARD.

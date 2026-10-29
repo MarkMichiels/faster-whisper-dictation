@@ -79,6 +79,11 @@ Environment=DICTATION_REVISION=$REVISION
 # from the journal (Python block-buffers stdout under systemd otherwise).
 Environment=PYTHONUNBUFFERED=1
 
+# Optional rewrite mode (Left-Alt + double tap): endpoint, model and the path of
+# a key file live outside the repository. The leading '-' keeps the service
+# starting when the file does not exist; dictation then works as before.
+EnvironmentFile=-%h/.config/faster-whisper-dictation/rewrite.env
+
 # No pattern-based pre-kill: systemd owns the lifecycle and stops every
 # process in this unit's cgroup. A pkill -f pattern also matched unrelated
 # shells and agent sessions whose command line merely mentioned dictation.py.
