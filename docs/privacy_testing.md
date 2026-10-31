@@ -66,7 +66,8 @@ for libraries, **not** a general network sandbox.
 
 Coverage includes context cleanup, one-shot prompt recovery, queue/sample-tail
 accounting, delivery failures, appended corrections, silent/caption rejection,
-quiet audible thanks, short repeated phrases, consecutive-session handling and
+standalone thanks rejection, thanks inside longer sentences, short repeated
+phrases, consecutive-session handling and
 bounded OOM diagnostics. Installer tests run a temporary source copy with a
 separate HOME and fake venv/pip/systemctl commands; they cover missing venvs,
 optional CUDA directories, Python-version-aware paths and rerun/check behavior.
@@ -79,6 +80,22 @@ To test a source-only handover independently, extract it into a separate
 folder, point the same NumPy-equipped interpreter at that tree and run the
 command there. Do **not** run its installer or start a second desktop instance.
 This also checks that tests and documentation do not depend on `.git`.
+
+### Standalone thanks policy
+
+With phrase filtering enabled, a whole chunk matching `THANK_PHRASES` after
+case/punctuation normalisation is rejected at every audio level, even without
+audio metadata. This deliberately also rejects a clearly spoken standalone
+thanks. A matching phrase embedded in a longer sentence is not rejected by this
+rule. The same policy applies to ordinary output and stop recovery; other
+silence/caption gates remain independent.
+
+Aggregate RMS, peak and above-threshold duration are not labelled speech:
+noise can have peaks and short energy bursts, while quiet speech can have low
+levels. Without labelled recordings, no audio threshold is claimed to reliably
+separate those cases. This conservative policy avoids relying on such a cutoff.
+The existing phrase-filter opt-out still applies; it does not disable the
+independent audio acceptance gate.
 
 ### Optional model replay (not the unit test)
 

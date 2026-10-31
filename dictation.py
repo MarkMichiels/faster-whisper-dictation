@@ -53,7 +53,8 @@ CONTEXT_MAX_AGES = None   # None: context_capture's own PRIMARY/CLIPBOARD limits
 # enough noise to pass VAD. Only a chunk that is *entirely* one of these
 # phrases is dropped, never a phrase inside a real sentence, and every drop is
 # printed so nothing disappears silently from the journal.
-# These can also be literal dictation. Never reject them without audio evidence.
+# Standalone thanks are ambiguous without labelled audio: reject the exact
+# phrases regardless of level. Thanks inside a longer sentence are unaffected.
 THANK_PHRASES = (
     'dank u wel', 'dank je wel', 'dankjewel',
     'dank u wel voor het kijken', 'dank je wel voor het kijken',
@@ -180,17 +181,20 @@ def suspect_decode(text, duration):
 SILENT_PEAK_DBFS = -50.0
 
 
-def thanks_on_silence(text, audio):
-    """Require both low energy and a low peak; soft real thanks are not captions."""
-    return (_phrase_key(text) in _THANK_KEYS and audio is not None
-            and silent_audio(audio) and audio['peak_dbfs'] < SILENT_PEAK_DBFS)
+def is_standalone_thanks(text):
+    """Conservative whole-chunk filter, including deliberately spoken thanks.
+
+    Aggregate energy/peak figures cannot reliably distinguish quiet speech from
+    noise. Do not invent an audio threshold without labelled recordings.
+    """
+    return _phrase_key(text) in _THANK_KEYS
 
 
 def transcript_discard_reason(text, audio, drop_phrases=True):
     """One acceptance gate for ordinary output and each stop-recovery window."""
     if drop_phrases and text.strip() and (
             is_hallucination(text)
-            or thanks_on_silence(text, audio)):
+            or is_standalone_thanks(text)):
         return 'known_silence_artifact'
     # WP11: exactly two identical multiword phrases on short, near-idle audio.
     # Zero energy alone is not speech absence: quiet real words must survive.
@@ -212,7 +216,7 @@ def sanitize_transcript(text, drop_phrases=True, space_runs=True, ellipsis_style
 
     Returns '' when the chunk should not be typed at all.
     """
-    if drop_phrases and (is_hallucination(text) or thanks_on_silence(text, audio)):
+    if drop_phrases and (is_hallucination(text) or is_standalone_thanks(text)):
         print('[filter] Dropped silence artefact: %r' % text.strip())
         return ''
     cleaned = text
@@ -783,7 +787,7 @@ class TranscriptionWorker:
         duration = len(audio_fp32) / 16000
         text = decode(prompt)
         stats = audio_stats(audio_fp32)
-        suspect = suspect_decode(text, duration) or thanks_on_silence(text, stats)
+        suspect = suspect_decode(text, duration) or is_standalone_thanks(text)
         if suspect and not recovery:
             # Reset BEFORE retry: even a failed retry must break the cascade.
             self.reset_context()

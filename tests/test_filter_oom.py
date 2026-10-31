@@ -18,32 +18,44 @@ class FilterOOMTests(unittest.TestCase):
     def session(self, audio, text):
         return test_silence.PipelineSilenceTests().run_session([audio], [text, text])
 
-    def test_thanks_with_energy_survives_without_retry(self):
-        for text in ('Dank u wel.', 'Dank je wel.', 'Dankjewel.',
-                     'Bedankt voor het kijken.', 'Thank you for watching.'):
-            for level in (-24, -48):
-                with self.subTest(text=text, level=level):
-                    pasted, ledger, _, app = self.session(speech(1.544, level), text)
-                    self.assertEqual(pasted, [text])
-                    self.assertIsNone(ledger.entries[0]['discard_reason'])
-                    self.assertEqual(len(app.transcription_worker.calls), 1)
+    def test_standalone_thanks_dropped_at_every_level_and_duration(self):
+        for phrase in logic['THANK_PHRASES']:
+            text = phrase.upper() + '!'
+            for duration, level in ((0.344, -48), (1.544, -24), (2.0, -60), (10.5, -46)):
+                with self.subTest(phrase=phrase, duration=duration, level=level):
+                    pasted, ledger, _, _ = self.session(speech(duration, level), text)
+                    self.assertEqual(pasted, [])
+                    self.assertEqual(ledger.entries[0]['discard_reason'],
+                                     'known_silence_artifact')
 
-    def test_thanks_requires_silence_evidence(self):
-        self.assertEqual(logic['sanitize_transcript']('Dank u wel.'), 'Dank u wel.')
-        pasted, ledger, _, _ = self.session(np.zeros(24000, np.float32), 'Dank u wel.')
-        self.assertEqual(pasted, [])
-        self.assertEqual(ledger.entries[0]['discard_reason'], 'known_silence_artifact')
-        # Too short to classify as silence: do not silently lose a short thanks.
-        self.assertEqual(self.session(speech(0.5, -48), 'Dank u wel.')[0], ['Dank u wel.'])
+    def test_thanks_dropped_without_audio_but_filter_can_be_disabled(self):
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(logic['sanitize_transcript']('Dank u wel.'), '')
+        self.assertEqual(logic['transcript_discard_reason']('Dank u wel.', None),
+                         'known_silence_artifact')
+        self.assertIsNone(logic['transcript_discard_reason']('Dank u wel.', None, False))
+        self.assertEqual(logic['sanitize_transcript']('Dank u wel.', drop_phrases=False),
+                         'Dank u wel.')
+        self.assertEqual(self.session(np.zeros(24000, np.float32), 'Dank u wel.')[0], [])
 
-    def test_recovery_keeps_audible_thanks_but_not_captions(self):
+    def test_thanks_inside_longer_sentence_survives(self):
+        for text in ('Dank je wel voor de hulp met de blauwe deur.',
+                     'Ik zeg dank u wel en ga verder.', 'Thank you for watching the clock.'):
+            self.assertFalse(logic['is_standalone_thanks'](text))
+            self.assertIsNone(logic['transcript_discard_reason'](text, None))
+            self.assertEqual(logic['sanitize_transcript'](text), text)
+            self.assertEqual(self.session(speech(2), text)[0], [text])
+
+    def test_recovery_drops_standalone_thanks_but_keeps_longer_sentence(self):
         for text in ('Dank u wel.', 'Dankjewel.'):
             _, _, out, _ = test_silence.PipelineSilenceTests().run_session(
                 [speech(9.5)], ['', '', text])
-            corrections = lines(out, 'correction_delivery')
-            self.assertEqual(len(corrections), 1)
-            self.assertIn(text.rstrip('.'), corrections[0]['correction'])
-            self.assertFalse(lines(out, 'recovery_discarded'))
+            self.assertFalse(lines(out, 'correction_delivery'))
+            self.assertTrue(lines(out, 'recovery_discarded'))
+        text = 'Dank je wel voor de hulp met de blauwe deur.'
+        _, _, out, _ = test_silence.PipelineSilenceTests().run_session(
+            [speech(9.5)], ['', '', text])
+        self.assertEqual(len(lines(out, 'correction_delivery')), 1)
         for caption in ('ZANG EN MUZIEK', 'Ondertiteling door de Amara.org gemeenschap'):
             self.assertEqual(self.session(speech(1.5), caption)[0], [])
 
