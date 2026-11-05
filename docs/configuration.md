@@ -135,6 +135,8 @@ table and `config.example.yaml` in step with the code.
 | `rewrite.context.max_chars` | int | `100000` | 1000–500000 |  | `DICTATION_REWRITE_CONTEXT_MAX_CHARS` | Most characters of reply context sent. |
 | `rewrite.context.primary_max_age_s` | float | `20` | 0–3600 |  |  | Oldest highlighted text (PRIMARY) used as context. |
 | `rewrite.context.clipboard_max_age_s` | float | `120` | 0–3600 |  |  | Oldest clipboard text used as context. |
+| `rewrite.context.release_selection` | bool | `true` |  |  |  | After a Ctrl+A selection was taken as context, send one Ctrl+Home once the start keys are released. |
+| `rewrite.context.badge` | bool | `true` |  |  |  | Show a small corner badge when context was taken (length only). |
 <!-- settings-table:end -->
 
 Notes:

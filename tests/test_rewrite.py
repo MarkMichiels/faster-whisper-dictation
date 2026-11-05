@@ -25,15 +25,28 @@ sys.path.insert(0, str(ROOT))
 import context_capture  # noqa: E402
 import coverage_ledger as coverage  # noqa: E402
 import rewrite  # noqa: E402
+import context_badge  # noqa: E402
+import selection_release  # noqa: E402
 from test_recovery import load_logic, worker  # noqa: E402
 
 R = coverage.RATE
 ENDPOINT = 'https://llm.invalid/v1/chat/completions'
 
 
+class FakeBadge:
+    """Never start a real badge process from a test: it would draw on the live display."""
+    def __init__(self):
+        self.calls = []
+
+    def launch(self, chars, **kw):
+        self.calls.append(chars)
+        return True
+
+
 def app_logic():
     logic = load_logic()
     logic.update(rewrite=rewrite, context_capture=context_capture,
+                 selection_release=selection_release, context_badge=FakeBadge(),
                  HELD_FOR_REWRITE=coverage.HELD_FOR_REWRITE, diagnostic=coverage.diagnostic,
                  CoverageLedger=coverage.CoverageLedger, MAX_SECONDS=coverage.MAX_SECONDS, RATE=R)
     return logic
@@ -774,7 +787,8 @@ class ContextTests(AppStart, unittest.TestCase):
         self.assertLessEqual(len(ctx.text), 200 + len('\n[ingekort]\n'))
         self.assertEqual((ctx.chars, ctx.original_chars), (len(ctx.text), len(long_mail)))
         self.assertEqual(set(ctx.journal()),
-                         {'source', 'chars', 'age_s', 'truncated', 'original_chars', 'reasons'})
+                         {'source', 'chars', 'age_s', 'truncated', 'original_chars', 'reasons',
+                          'owner_same_client'})
         fits = 'Past precies binnen de grens. ' * 6
         ctx = context_capture.capture(self.fake_run(both(), {'primary': fits}), max_chars=len(fits.strip()))
         self.assertEqual((ctx.text, ctx.truncated), (fits.strip(), False))

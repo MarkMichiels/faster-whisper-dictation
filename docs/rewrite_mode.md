@@ -54,6 +54,12 @@ Sounds:
 | Two low tones, then start sound | Rewrite mode is not configured: ordinary dictation runs |
 | Three equal short tones while recording | The microphone delivers only digital silence (also in ordinary dictation) |
 
+When reply context was taken (from the selection or the clipboard), a small
+green badge appears for 1.5 s in the top-right corner of the monitor that
+holds the focused window: `Context opgepakt: 4.312 tekens`. It shows only the
+length, never any of the text. It takes no focus and clicks pass through it.
+Turn it off with `rewrite.context.badge: false`.
+
 ## Paste safety
 
 The app sends only the paste shortcut, never Enter or Shift+Enter. **Every
@@ -130,6 +136,52 @@ formatting or ownership record contains text.
 7. A range that could not be found back still adds the `[Controle: …]` line
    after the text; it is never sent to the model.
 
+## Releasing a Ctrl+A selection
+
+Answering in the reply field itself: press **Ctrl+A** in the reply field,
+then start with Left Alt + double-tap. The whole field is taken as context.
+Once you release the start modifiers, the app sends **one Ctrl+Home**: the
+selection is gone and the caret sits at the top, so the rewritten text is
+pasted above the quoted message instead of replacing it.
+
+It does this only when all of these hold; otherwise it does nothing and the
+journal line `selection_release` gives the reason (`fired`, `reason`, `wait_s`):
+
+1. The context came from the highlighted text (PRIMARY), not the clipboard.
+2. The focused window is no terminal (built-in list plus
+   `output.extra_terminal_classes`), and the session is not a Left Ctrl
+   (terminal) session.
+3. The app heard Ctrl+A (either Ctrl) at most 20 s before the start, in the
+   same focused window.
+4. Since that Ctrl+A no mouse button was pressed and no other key was typed
+   (modifiers, the start key and Ctrl+C/Ctrl+Insert do not count).
+5. The selection owner is the same X client as the focused window.
+6. The selection's timestamp matches the moment of the Ctrl+A (within
+   0.6 s), so the current selection is that one and not a later one.
+7. No earlier session is still finishing (it may still paste).
+8. After the start, Left Alt, Left Ctrl and Left Shift are released within
+   2 s, without another key, a click or a focus change in between.
+
+Why so strict: X11 cannot tell where a selection lies. A message selected in a
+read-only pane and a caret placed in the reply field of the same program look
+the same; a key there would move your caret. So a mouse selection or a
+Shift+arrow selection is never touched; only a Ctrl+A the app saw itself.
+
+Why Ctrl+Home: after Ctrl+A, Left leaves the caret one character before the
+end in some editors (LibreOffice Writer); Ctrl+Home puts it at the top in
+browsers and Writer alike. Why wait for the release: with Left Alt still held
+the key would be Alt+key (a browser goes back in history). The key goes out
+through XTest like the paste shortcut, without `--clearmodifiers`. Nothing else
+is ever sent: no Enter, Tab or Escape.
+
+Known side effects: after Ctrl+A in a read-only page, Ctrl+Home scrolls to the
+top. A spreadsheet treats Ctrl+Home as "go to A1". Turn the feature off with
+`rewrite.context.release_selection: false`.
+
+The app keeps a small record of key and mouse presses for this: only times,
+the focused window id at Ctrl+A, and whether Ctrl+A was pressed. No key text
+and no pointer positions.
+
 ## Reply context
 
 At start the app reads, in this order:
@@ -191,6 +243,8 @@ rewrite:
   #   max_chars: 100000
   #   primary_max_age_s: 20
   #   clipboard_max_age_s: 120
+  #   release_selection: true
+  #   badge: true
 ```
 
 **Older setups:** `rewrite.env` still works. The service unit reads it as an

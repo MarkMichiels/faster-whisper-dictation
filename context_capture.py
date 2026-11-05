@@ -56,12 +56,16 @@ class Context:
     truncated: bool = False
     reasons: dict[str, str] = field(default_factory=dict)
     original_chars: Optional[int] = None
+    # Origin of PRIMARY, for selection_release: the input focus window at the
+    # probe and whether the PRIMARY owner is the same X client. No text.
+    focus_window: Optional[int] = None
+    owner_same_client: Optional[bool] = None
 
     def journal(self) -> dict[str, Any]:
         """Metadata only: never the text."""
         return dict(source=self.source, chars=self.chars, age_s=self.age_s,
                     truncated=self.truncated, original_chars=self.original_chars,
-                    reasons=dict(self.reasons))
+                    reasons=dict(self.reasons), owner_same_client=self.owner_same_client)
 
 
 def shorten(text: str, max_chars: int) -> str:
@@ -136,6 +140,10 @@ def capture(run: Callable = subprocess.run,
     meta = probe(run)
     if meta is None:
         return Context(None, reasons={'primary': 'probe_failed', 'clipboard': 'probe_failed'})
+    focus = meta.get('focus') if isinstance(meta.get('focus'), int) else None
+    primary = meta.get('primary') or {}
+    same = primary.get('same_client') if isinstance(primary.get('same_client'), bool) else None
+    origin = dict(focus_window=focus, owner_same_client=same)
     for selection, max_age in zip(('primary', 'clipboard'), max_ages):
         reason = judge(selection, meta.get(selection), max_age)
         if reason:
@@ -153,8 +161,8 @@ def capture(run: Callable = subprocess.run,
         original = len(text)
         text = shorten(text, max_chars)
         return Context(text, selection, len(text), meta[selection].get('age_s'),
-                       original > max_chars, reasons, original)
-    return Context(None, reasons=reasons)
+                       original > max_chars, reasons, original, **origin)
+    return Context(None, reasons=reasons, **origin)
 
 
 # ---------------------------------------------------------------------------
@@ -171,9 +179,15 @@ def _probe_x(names: tuple = ('PRIMARY', 'CLIPBOARD'), deadline_s: float = 1.0) -
         win = d.screen().root.create_window(0, 0, 1, 1, 0, X.CopyFromParent,
                                             event_mask=X.PropertyChangeMask)
         clock = atom('DCT_PROBE_CLOCK')
+        # Input focus and X client (resource-id base) of each owner: lets the
+        # caller check that PRIMARY belongs to the focused program. Ids only.
+        mask = d.display.info.resource_id_mask
+        focus = d.get_input_focus().focus
+        focus_id = getattr(focus, 'id', focus) or 0
+        focus_id = focus_id if focus_id > 1 else 0  # 0 = None, 1 = PointerRoot
         # Our own property change returns the current server time.
         win.change_property(clock, Xatom.STRING, 8, b'1')
-        result: dict[str, Any] = {}
+        result: dict[str, Any] = {'focus': focus_id or None}
         pending: dict[tuple[int, int], tuple[str, str, int]] = {}
         for name in names:
             selection = atom(name)
@@ -181,7 +195,9 @@ def _probe_x(names: tuple = ('PRIMARY', 'CLIPBOARD'), deadline_s: float = 1.0) -
             if getattr(owner, 'id', owner) in (0, None):
                 result[name.lower()] = dict(owner=False)
                 continue
-            result[name.lower()] = dict(owner=True, targets=None, timestamp=None)
+            owner_id = getattr(owner, 'id', owner)
+            result[name.lower()] = dict(owner=True, targets=None, timestamp=None,
+                                        same_client=bool(focus_id) and (owner_id & ~mask) == (focus_id & ~mask))
             for target in ('TARGETS', 'TIMESTAMP'):
                 prop = atom('DCT_PROBE_%s_%s' % (name, target))
                 win.convert_selection(selection, atom(target), prop, X.CurrentTime)
@@ -210,7 +226,7 @@ def _probe_x(names: tuple = ('PRIMARY', 'CLIPBOARD'), deadline_s: float = 1.0) -
                     result[name]['targets'] = [d.get_atom_name(v) for v in values]
                 elif values and int(values[0]):
                     result[name]['timestamp'] = int(values[0])
-        for meta in result.values():
+        for meta in (v for v in result.values() if isinstance(v, dict)):
             stamp = meta.pop('timestamp', None)
             meta['age_s'] = (round(((now - stamp) & 0xFFFFFFFF) / 1000.0, 3)
                              if stamp and now is not None else None)

@@ -138,6 +138,9 @@ SCHEMA: tuple[Setting, ...] = (
        low=0, high=3600),
     _s('rewrite.context.clipboard_max_age_s', 'float', 120, 'Oldest clipboard text used as context.',
        low=0, high=3600),
+    _s('rewrite.context.release_selection', 'bool', True, 'After a Ctrl+A selection was taken as context, '
+       'send one Ctrl+Home once the start keys are released.'),
+    _s('rewrite.context.badge', 'bool', True, 'Show a small corner badge when context was taken (length only).'),
 )
 BY_PATH = {s.path: s for s in SCHEMA}
 GROUPS = tuple(dict.fromkeys(s.path.split('.')[0] for s in SCHEMA))

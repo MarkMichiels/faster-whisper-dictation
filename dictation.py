@@ -16,8 +16,10 @@ from pynput import mouse
 from transitions import Machine
 from coverage_ledger import (CoverageLedger, diagnostic, MAX_SECONDS, RATE, audio_stats, silent_audio,
                              HELD_FOR_REWRITE)
+import context_badge
 import context_capture
 import rewrite
+import selection_release
 import settings
 
 # PortAudio paInputOverflowed: input samples were dropped by the driver.
@@ -36,6 +38,8 @@ SOUND_START = 'assets/granted-04.wav'
 SOUND_STOP = 'assets/beepbeep.wav'
 REWRITE_ENVIRON = None    # None: rewrite.load_config reads os.environ
 CONTEXT_MAX_AGES = None   # None: context_capture's own PRIMARY/CLIPBOARD limits
+RELEASE_SELECTION = True  # rewrite.context.release_selection
+CONTEXT_BADGE = True      # rewrite.context.badge
 
 # ---------------------------------------------------------------------------
 # Output hygiene: hallucination filter + horizontal-rule guard
@@ -1141,6 +1145,10 @@ class KeyboardReplayer():
             self.kb.release(keyboard.Key.shift)
         self.kb.release(keyboard.Key.ctrl)
 
+    def send_ctrl_home(self):
+        """One Ctrl+Home via XTest, for selection_release only. No other key."""
+        selection_release.send_ctrl_home(self.kb, keyboard.Key)
+
     def add_to_history(self, text):
         """Put text in CopyQ history only (no clipboard change, no paste)."""
         try:
@@ -1267,6 +1275,8 @@ class MultiTapKeyListener():
 
     TAP_WINDOW = 0.3   # max seconds between taps for double-tap
     META_L_VK = 0xffe7  # keysym Meta_L: Left-Alt pressed or released while Shift is held
+    # Optional selection_release.InputTrace: Ctrl+A, other keys (no key text kept).
+    trace = None
 
     def __init__(self, activate_callback, deactivate_callback,
                  toggle_language_callback=None, key=keyboard.Key.cmd_r,
@@ -1282,6 +1292,7 @@ class MultiTapKeyListener():
         self.alt_held = False
         self.alt_as_meta = False
         self.ctrl_held = False
+        self.right_ctrl_down = False  # only for recognising Ctrl+A, never a rewrite modifier
         self.main_down = False
         # Last press / release time per modifier, for the journal only.
         self.mod_times = {'shift': [None, None], 'alt': [None, None], 'ctrl': [None, None]}
@@ -1328,8 +1339,28 @@ class MultiTapKeyListener():
             info['alt_as_meta'] = True
         return info
 
+    def modifiers_held(self):
+        """A start modifier (Left Alt, Left Ctrl, Left Shift) is still down."""
+        return self.alt_held or self.ctrl_held or self.shift_held
+
+    def _trace_press(self, key):
+        """Feed the input trace; cheap, never raises, keeps no key text."""
+        try:
+            kind = selection_release.classify_key(
+                key, self.ctrl_held or self.right_ctrl_down, self._key_matches(key, self.key))
+            if kind == 'select_all':
+                self.trace.select_all()
+            elif kind == 'other':
+                self.trace.other_key()
+        except Exception:
+            pass
+
     def on_press(self, key):
         name = getattr(key, 'name', None)
+        if self._get_vk(key) == 65508:
+            self.right_ctrl_down = True
+        if self.trace is not None:
+            self._trace_press(key)
         if self._get_vk(key) == 65507:
             if not self.ctrl_held:
                 self._mod_event('ctrl', True)
@@ -1397,6 +1428,8 @@ class MultiTapKeyListener():
         name = getattr(key, 'name', None)
         if self._key_matches(key, self.key):
             self.main_down = False
+        if self._get_vk(key) == 65508:
+            self.right_ctrl_down = False
         if self._get_vk(key) == 65507:
             if self.ctrl_held:
                 self._mod_event('ctrl', False)
@@ -1654,7 +1687,7 @@ def parse_args(argv=None, environ=None):
 
 def apply_settings(loaded, environ=None):
     """Settings without a CLI option go to the module and class attributes that hold them."""
-    global SOUND_START, SOUND_STOP, REWRITE_ENVIRON, CONTEXT_MAX_AGES
+    global SOUND_START, SOUND_STOP, REWRITE_ENVIRON, CONTEXT_MAX_AGES, RELEASE_SELECTION, CONTEXT_BADGE
     import coverage_ledger
     MultiTapKeyListener.TAP_WINDOW = loaded.get('keys.tap_window_s')
     MouseToggleListener.COALESCE_WINDOW = loaded.get('mouse.coalesce_s')
@@ -1667,6 +1700,8 @@ def apply_settings(loaded, environ=None):
     REWRITE_ENVIRON = settings.rewrite_environ(loaded, environ)
     CONTEXT_MAX_AGES = (loaded.get('rewrite.context.primary_max_age_s'),
                         loaded.get('rewrite.context.clipboard_max_age_s'))
+    RELEASE_SELECTION = loaded.get('rewrite.context.release_selection')
+    CONTEXT_BADGE = loaded.get('rewrite.context.badge')
 
 
 # ---------------------------------------------------------------------------
@@ -1937,6 +1972,7 @@ class App():
         """
         if self.active:
             return None
+        started_at = time.monotonic()
         start_sound = 'start_recording'
         if rewrite_mode:
             unavailable = rewrite.availability(getattr(self, 'rewrite_config', None),
@@ -1993,10 +2029,15 @@ class App():
             # Read once, now: after the recorder (no audio lost) and before
             # anything of this session pastes. Never read again.
             ages = {} if CONTEXT_MAX_AGES is None else dict(max_ages=CONTEXT_MAX_AGES)
+            read_at = time.monotonic()
             context = context_capture.capture(max_chars=self.rewrite_config.context_max_chars, **ages)
+            read_done = time.monotonic()
             session.context = context.text
             diagnostic('rewrite_context', **context.journal())
             start_sound = 'rewrite_start_context' if context.text else 'rewrite_start'
+            if context.text and CONTEXT_BADGE:
+                context_badge.launch(context.chars, log=diagnostic)
+            self._plan_selection_release(session, context, started_at, read_at, read_done, previous)
 
         self.beep(start_sound, wait=False)
         print('Recording (streaming mode) ...')
@@ -2017,6 +2058,45 @@ class App():
         self.timer.start()
 
         return True
+
+    def _plan_selection_release(self, session, context, started_at, read_at, read_done, previous):
+        """Release a Ctrl+A selection taken as context (selection_release). Never raises.
+
+        Plans now, on the listener thread; waits for the start chord to be
+        released on a thread of its own, so the listener keeps seeing keys.
+        """
+        try:
+            if not RELEASE_SELECTION:
+                diagnostic('selection_release', fired=False, reason='disabled', wait_s=0)
+                return
+            trace = getattr(self, 'input_trace', None)
+            listener = getattr(self, 'key_listener', None)
+            if trace is None or listener is None:
+                diagnostic('selection_release', fired=False, reason='keys_unknown', wait_s=0)
+                return
+            terminal = bool(session.terminal_mode)
+            if not terminal and context.source == 'primary':
+                wm_class = getattr(self.replayer, '_get_active_window_class', lambda: '')()
+                terminal = wm_class in getattr(self.replayer, 'TERMINAL_CLASSES', ())
+            start = selection_release.StartState(
+                now=read_at, context_source=context.source,
+                primary_age_s=context.age_s if context.source == 'primary' else None,
+                focus_window=context.focus_window, focus_is_terminal=terminal,
+                owner_same_client=context.owner_same_client, probe_done=read_done,
+                previous_busy=previous is not None and not previous.is_set())
+            ok, reason = selection_release.plan_release(trace.snapshot(), start)
+            if not ok:
+                diagnostic('selection_release', fired=False, reason=reason, wait_s=0)
+                return
+            def run():
+                result = selection_release.wait_and_release(
+                    trace, started_at, context.focus_window, listener.modifiers_held,
+                    self.replayer.send_ctrl_home,
+                    session_active=lambda: self.session is session and self.active)
+                diagnostic('selection_release', **result)
+            threading.Thread(target=run, daemon=True).start()
+        except Exception as exc:
+            diagnostic('selection_release', fired=False, reason='error', error=type(exc).__name__, wait_s=0)
 
     def stop(self):
         """Stop the current dictation session."""
@@ -2371,6 +2451,11 @@ class App():
                 default_language=self.args.language,
                 shift_language=self.args.shift_language,
             )
+            self.input_trace = selection_release.InputTrace()
+            keylistener.trace = self.input_trace
+            self.key_listener = keylistener
+            self.input_trace.set_known(keys=True)
+            self._start_input_mouse_listener()
             print("Double tap %s to start/stop (language: %s). Hold Left-Shift + double tap to dictate in %s."
                   " Add Left-Alt for rewrite mode." % (key, self.args.language or 'auto-detect', self.args.shift_language))
         else:
@@ -2382,6 +2467,25 @@ class App():
             self.toggle, (self.args.mouse_buttons or '').split(',')).start()
 
         keylistener.run()
+
+    def _start_input_mouse_listener(self):
+        """Always-on record of mouse presses for selection_release (no positions kept).
+
+        Separate from the thumb-button toggle, which only runs when buttons are
+        configured. Without it a click is unknown and no selection is released.
+        """
+        trace = self.input_trace
+
+        def on_click(x, y, button, pressed):
+            if pressed:
+                trace.mouse_press()
+        try:
+            listener = mouse.Listener(on_click=on_click)
+            listener.daemon = True
+            listener.start()
+            trace.set_known(mouse=True)
+        except Exception as exc:
+            diagnostic('selection_release_mouse_unavailable', error=type(exc).__name__)
 
 
 def warn_if_wayland():

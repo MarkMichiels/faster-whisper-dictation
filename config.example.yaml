@@ -64,3 +64,5 @@ rewrite:
     # max_chars: 100000    # Most characters of reply context sent.
     # primary_max_age_s: 20    # Oldest highlighted text (PRIMARY) used as context.
     # clipboard_max_age_s: 120    # Oldest clipboard text used as context.
+    # release_selection: true    # After a Ctrl+A selection was taken as context, send one Ctrl+Home once the start keys are released.
+    # badge: true    # Show a small corner badge when context was taken (length only).

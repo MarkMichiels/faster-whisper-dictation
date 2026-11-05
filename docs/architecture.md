@@ -44,6 +44,8 @@ recognition, this source adds:
 | `rewrite.py` | Optional rich or plain-terminal rewrite: merged settings, one chat-completions call (stdlib), JSON/mail/visible-word checks and raw-text fallback |
 | `rich_text.py` | Restricted Markdown token renderer (markdown-it-py, raw HTML off): escaped tag whitelist, same-tree plain text, literal mail paragraphs; never active links or resources |
 | `context_capture.py` | Optional rewrite mode: one-time PRIMARY/CLIPBOARD reply-context capture with age, origin and secret checks |
+| `selection_release.py` | Optional rewrite mode: decide from the app's own key/mouse trace whether a Ctrl+A selection taken as context may be released with one Ctrl+Home after the start keys are up |
+| `context_badge.py` | Optional rewrite mode: short-lived, focus-less corner badge showing the length of the captured context |
 | `install.sh` | Render/install/check the systemd user unit; creates `config.yaml` once with a GPU/Dutch profile, never overwrites it; optional rewrite environment file |
 | `free_mouse_thumb_buttons.sh` | Map buttons 8/9 to 10/11 on suitable physical X pointers |
 | `watch_mouse_thumb_buttons.sh` | Reapply maps at startup and after udev input-add events |
