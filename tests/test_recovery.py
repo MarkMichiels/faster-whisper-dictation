@@ -23,7 +23,7 @@ def load_logic(path=None):
         if isinstance(node, (ast.Assign, ast.FunctionDef)):
             if getattr(node, 'lineno', 0) < next(n.lineno for n in tree.body if isinstance(n, ast.ClassDef)):
                 nodes.append(node)
-        elif isinstance(node, ast.ClassDef) and node.name in ('TranscriptionWorker', 'StreamingRecorder', 'App'):
+        elif isinstance(node, ast.ClassDef) and node.name in ('TranscriptionWorker', 'OomRecovery', 'StreamingRecorder', 'App'):
             nodes.append(node)
     ns = {'re': re, 'np': np, 'threading': threading, 'queue': queue, 'time': time,
           'platform': types.SimpleNamespace(system=lambda: 'Linux'),

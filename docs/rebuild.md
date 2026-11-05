@@ -272,6 +272,9 @@ local editor field. For a new target's acceptance check:
    on a later logout/login separately if required.
 
 The start sound follows recorder-thread startup, not a hardware-ready handshake.
+Three equal short tones during a session mean the input has delivered only
+digital zeros for two seconds (muted or switched source, disconnected device):
+the start sound alone does not prove that audio arrives.
 The stop sound is **not** completion of transcription or recovery. Let finishing
 work drain before stopping/restarting the service; service shutdown or Ctrl+C
 is not a guaranteed graceful recovery flush. Preserve existing code/environment

@@ -52,6 +52,7 @@ Sounds:
 | Short mid tone after stop | Rewritten text pasted |
 | Two low tones | Rewrite failure (raw text fallback), unavailable rich clipboard (plain fallback), or refused clipboard ownership check (no paste) |
 | Two low tones, then start sound | Rewrite mode is not configured: ordinary dictation runs |
+| Three equal short tones while recording | The microphone delivers only digital silence (also in ordinary dictation) |
 
 ## Paste safety
 

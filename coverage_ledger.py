@@ -151,6 +151,14 @@ def stop_status(checked: int, corrected: int, unresolved: int, seconds: float,
     return '[Controle: %s, %s]' % (', '.join(parts), took)
 
 
+# A microphone that passes nothing delivers exact zeros, not a quiet room: even
+# the stillest room keeps a few LSB of noise, and the longest zero run seen in
+# ordinary recordings was 0.21 s. Two seconds of unbroken zeros therefore means
+# the input is muted, switched or disconnected; the app plays a tone at once,
+# so Mark knows his words are not arriving.
+DIGITAL_SILENCE_S = 2.0
+
+
 # Delivery path of rewrite mode: the range is accepted and kept in the session
 # until stop, then rewritten and pasted once.
 HELD_FOR_REWRITE = 'held_for_rewrite'
@@ -164,6 +172,11 @@ class CoverageLedger:
         self.entries = []
         self.started = time.time()
         self.warned = False
+        # Digital silence: unbroken run of exact-zero samples up to now.
+        self.zero_run = 0
+        self.longest_zero_run = 0
+        self.digital_silence = False
+        self.on_digital_silence: Optional[Callable[[], None]] = None
 
     def incident(self, kind: str, **details: Any) -> None:
         # Journal only; no desktop notifications.
@@ -175,10 +188,32 @@ class CoverageLedger:
         self.frame_starts.append(self.samples)
         self.frames.append(data)
         self.samples += len(data) // 2
+        self._track_zeros(data)
         if not self.warned and self.samples >= (MAX_SECONDS - 60) * RATE:
             self.warned = True
             self.incident('duration_warning', remaining_seconds=60)
         return data
+
+    def _track_zeros(self, data: bytes) -> None:
+        """Report the first run of DIGITAL_SILENCE_S exact zeros, once per session."""
+        x = np.frombuffer(data, dtype=np.int16)
+        if not len(x):
+            return
+        nonzero = np.flatnonzero(x)
+        self.zero_run = self.zero_run + len(x) if not len(nonzero) else len(x) - 1 - int(nonzero[-1])
+        self.longest_zero_run = max(self.longest_zero_run, self.zero_run)
+        if self.digital_silence or self.zero_run < DIGITAL_SILENCE_S * RATE:
+            return
+        self.digital_silence = True
+        # Metadata only: where the run started and how long it was when noticed.
+        self.incident('digital_silence', start_s=round((self.samples - self.zero_run) / RATE, 2),
+                      zero_run_s=round(self.zero_run / RATE, 2), threshold_s=DIGITAL_SILENCE_S)
+        if self.on_digital_silence is not None:
+            try:
+                self.on_digital_silence()
+            except Exception as exc:
+                # A failed tone must never stop the recording.
+                diagnostic('digital_silence_alert_failed', error=type(exc).__name__)
 
     def audio(self, start: int, end: int) -> np.ndarray:
         """int16 samples [start, end) from the RAM frames, without joining all."""
@@ -389,6 +424,8 @@ class CoverageLedger:
                        unresolved_ranges=self._unresolved(targets),
                        silent_ranges=sum(bool((e['recovery'] or {}).get('silent')) for e in targets),
                        duplicate_ranges=sum(bool((e['recovery'] or {}).get('duplicate')) for e in targets),
+                       digital_silence=self.digital_silence,
+                       longest_zero_run_s=round(self.longest_zero_run / RATE, 2),
                        original_delivery_failures=sum(self._failed_delivery(e) for e in self.entries),
                        correction_delivery_failures=sum(not
                            (e['recovery'].get('delivery') or {}).get('ok') for e in corrected_entries),

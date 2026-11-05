@@ -228,6 +228,11 @@ def sanitize_transcript(text, drop_phrases=True, space_runs=True, ellipsis_style
     return cleaned
 
 
+def is_cuda_oom(exc):
+    message = str(exc).lower()
+    return 'cuda' in message and 'out of memory' in message
+
+
 def log_cuda_oom_snapshot():
     """One read-only, time/output-bounded diagnostic; never obscure the OOM."""
     fields = dict(pid=os.getpid())
@@ -312,6 +317,7 @@ def rewrite_sounds(start):
     start twice + high pip   rewrite mode with context
     short mid tone           rewritten text pasted
     two low tones            rewrite failed or unavailable: raw text pasted
+    three equal short tones  microphone delivers only digital silence (any mode)
     """
     channels = start.shape[1] if getattr(start, 'ndim', 1) > 1 else 1
     def gap(ms):
@@ -325,6 +331,9 @@ def rewrite_sounds(start):
         'rewrite_done': tone(880, 80, channels=channels),
         'rewrite_failed': failed,
         'rewrite_unavailable': np.concatenate([failed, gap(80), start]),
+        'mic_silent': np.concatenate([tone(440, 80, channels=channels), gap(80),
+                                      tone(440, 80, channels=channels), gap(80),
+                                      tone(440, 80, channels=channels)]),
     }
 
 
@@ -739,9 +748,10 @@ class TranscriptionWorker:
 
     def __init__(self, model_size='base', device='cpu', compute_type='int8', language=None,
                  context_chars=500, vad_filter=False, filter_hallucinations=True,
-                 space_rule_runs=True, ellipsis_style='space'):
+                 space_rule_runs=True, ellipsis_style='space', model_options=None):
         print('Loading Whisper model: %s (device=%s, compute=%s)' % (model_size, device, compute_type))
-        self.model = WhisperModel(model_size, device=device, compute_type=compute_type)
+        self.model = WhisperModel(model_size, device=device, compute_type=compute_type,
+                                  **(model_options or {}))
         self.language = language
         # Rolling tail of text transcribed earlier in this session, fed to the
         # next chunk as initial_prompt so eager-flush chunks keep cross-seam
@@ -779,8 +789,7 @@ class TranscriptionWorker:
                 segments, info = self.model.transcribe(audio_fp32, **options)
                 return ''.join(segment.text for segment in segments).lstrip()
             except Exception as exc:
-                message = str(exc).lower()
-                if 'cuda' in message and 'out of memory' in message:
+                if is_cuda_oom(exc):
                     log_cuda_oom_snapshot()
                 raise
 
@@ -824,6 +833,142 @@ class TranscriptionWorker:
             self._context = (prompt_text(self._context) + ' ' + context).strip()[-self.context_chars:]
 
         return text
+
+
+class OomRecovery:
+    """Stop-check decoding with one real second chance after a CUDA OOM.
+
+    A short OOM clears within the ledger's 200 ms; a lasting one (another
+    process holding the GPU) does not. Per stop check, the first OOM starts a
+    budget: one GPU retry after GPU_WAIT_S, then the same model on the CPU,
+    loaded only now and released when the stop check ends. No extra VRAM, no
+    second resident model. BUDGET_S is a hard ceiling on the extra wait: a
+    CPU window runs on its own thread and is abandoned at the deadline (the
+    range then counts as not found back; the thread finishes in the background
+    and releases the model). Measured offline (large-v3 int8, 6 threads): load
+    1.5-5.4 s, 3.3-4.1 s per 10 s window, about 1.7-2.3 GB RAM while loaded.
+    """
+    GPU_WAIT_S = 2.0
+    BUDGET_S = 60.0
+    CPU_THREADS = 6
+
+    class BudgetExceeded(RuntimeError):
+        pass
+
+    def __init__(self, gpu_decode, load_cpu_worker, clock=time.monotonic, sleep=time.sleep):
+        self.gpu_decode = gpu_decode
+        self.load_cpu_worker = load_cpu_worker
+        self.clock, self.sleep = clock, sleep
+        self.deadline = None
+        self.gpu_retried = False
+        self.gpu_gave_up = False
+        self.cpu_worker = None
+        self.thread = None
+        self.closed = False
+        self.lock = threading.Lock()
+        self.slowest_window_s = 0.0
+        self.counts = dict(gpu_retry_ok=0, gpu_retry_oom=0, cpu_ok=0, cpu_failed=0,
+                           cpu_abandoned=0, budget_refused=0)
+
+    def _remaining(self):
+        return self.deadline - self.clock()
+
+    def decode(self, audio):
+        if not self.gpu_gave_up:
+            try:
+                return self.gpu_decode(audio)
+            except Exception as exc:
+                if not is_cuda_oom(exc):
+                    raise
+            if self.deadline is None:
+                self.deadline = self.clock() + self.BUDGET_S
+            if not self.gpu_retried:
+                self.gpu_retried = True
+                wait = max(0.0, min(self.GPU_WAIT_S, self._remaining()))
+                self.sleep(wait)
+                try:
+                    text = self.gpu_decode(audio)
+                    self.counts['gpu_retry_ok'] += 1
+                    diagnostic('oom_recovery', route='gpu_retry', ok=True, wait_s=wait)
+                    return text
+                except Exception as exc:
+                    if not is_cuda_oom(exc):
+                        raise
+                    self.counts['gpu_retry_oom'] += 1
+                    diagnostic('oom_recovery', route='gpu_retry', ok=False, wait_s=wait)
+            self.gpu_gave_up = True  # The rest of this stop check goes to the CPU.
+        return self._cpu(audio)
+
+    def _cpu(self, audio):
+        remaining = self._remaining()
+        seconds = round(len(audio) / 16000, 2)
+        busy = self.thread is not None and self.thread.is_alive()
+        if busy or remaining <= 0 or remaining < self.slowest_window_s:
+            self.counts['budget_refused'] += 1
+            diagnostic('oom_recovery', route='cpu', ok=False, reason='budget',
+                       window_s=seconds, remaining_s=round(max(0.0, remaining), 2))
+            raise self.BudgetExceeded('oom_recovery_budget_exhausted')
+        box = {}
+
+        def run():
+            try:
+                t0 = self.clock()
+                if self.cpu_worker is None:
+                    self.cpu_worker = self.load_cpu_worker()
+                    box['load_s'] = round(self.clock() - t0, 2)
+                t1 = self.clock()
+                box['text'] = self.cpu_worker.transcribe_chunk(audio, recovery=True)
+                box['decode_s'] = self.clock() - t1
+            except Exception as exc:
+                box['error'] = exc
+            finally:
+                with self.lock:
+                    if self.closed:
+                        self._release()
+
+        self.thread = threading.Thread(target=run, daemon=True)
+        self.thread.start()
+        self.thread.join(remaining)
+        if self.thread.is_alive():
+            self.counts['cpu_abandoned'] += 1
+            diagnostic('oom_recovery', route='cpu', ok=False, reason='deadline', window_s=seconds)
+            raise self.BudgetExceeded('oom_recovery_deadline')
+        if 'error' in box:
+            self.counts['cpu_failed'] += 1
+            diagnostic('oom_recovery', route='cpu', ok=False, reason='error',
+                       error=type(box['error']).__name__, window_s=seconds)
+            raise box['error']
+        self.slowest_window_s = max(self.slowest_window_s, box['decode_s'])
+        self.counts['cpu_ok'] += 1
+        diagnostic('oom_recovery', route='cpu', ok=True, window_s=seconds,
+                   load_s=box.get('load_s'), decode_s=round(box['decode_s'], 2))
+        return box['text']
+
+    def _release(self):
+        if self.cpu_worker is None:
+            return
+        self.cpu_worker = None
+        import gc
+        gc.collect()
+        try:
+            # glibc keeps freed model memory in its arenas until trimmed.
+            import ctypes
+            ctypes.CDLL('libc.so.6').malloc_trim(0)
+        except Exception:
+            pass
+        diagnostic('oom_recovery_released')
+
+    def close(self):
+        """End of the stop check: release the CPU model, now or when its thread ends."""
+        with self.lock:
+            self.closed = True
+            running = self.thread is not None and self.thread.is_alive()
+            if not running:
+                self._release()
+        if self.deadline is not None:
+            diagnostic('oom_recovery_summary', budget_s=self.BUDGET_S,
+                       used_s=round(self.BUDGET_S - max(0.0, self._remaining()), 2),
+                       cpu_still_running=running, **self.counts)
 
 
 # ---------------------------------------------------------------------------
@@ -1748,6 +1893,30 @@ class App():
     def beep(self, k, wait=True):
         playsound(self.SOUND_EFFECTS[k], wait=wait)
 
+    def _mic_silent_alert(self):
+        """Three equal tones: the microphone passes only exact zeros. Called
+        from the recording thread, so the stream opens on a thread of its own."""
+        threading.Thread(target=self.beep, args=('mic_silent', False), daemon=True).start()
+
+    def _load_cpu_recovery_worker(self):
+        """Same model on the CPU, for OomRecovery only; never kept after a stop check."""
+        gpu = self.transcription_worker
+        return TranscriptionWorker(
+            self.args.model_name, 'cpu', 'int8', gpu.language, context_chars=0,
+            vad_filter=gpu.vad_filter, filter_hallucinations=gpu.filter_hallucinations,
+            space_rule_runs=gpu.space_rule_runs, ellipsis_style=gpu.ellipsis_style,
+            model_options=dict(cpu_threads=OomRecovery.CPU_THREADS, local_files_only=True))
+
+    def _stop_check(self, ledger, deliver, **options):
+        recovery = OomRecovery(
+            lambda audio: self.transcription_worker.transcribe_chunk(audio, recovery=True),
+            self._load_cpu_recovery_worker)
+        try:
+            return ledger.finish(recovery.decode, deliver, is_artifact=is_hallucination,
+                                 discard_recovery=transcript_discard_reason, **options)
+        finally:
+            recovery.close()
+
     def start(self, language=_UNSET, rewrite_mode=False, keys=None):
         """Begin a streaming dictation session.
 
@@ -1788,6 +1957,7 @@ class App():
         self.typing_queue = queue.Queue()
 
         self.ledger = CoverageLedger()
+        self.ledger.on_digital_silence = self._mic_silent_alert
         # Publish the new session before anything slow (recorder start, xdotool):
         # a previous session that ends meanwhile must see it is no longer the
         # current one, or it would clear `active` while this one records.
@@ -2070,10 +2240,7 @@ class App():
                     status.append(line)  # only the check line arrives here (inline)
                     return dict(ok=True, path=HELD_FOR_REWRITE)
                 try:
-                    ledger.finish(
-                        lambda audio: self.transcription_worker.transcribe_chunk(audio, recovery=True),
-                        deliver, is_artifact=is_hallucination,
-                        discard_recovery=transcript_discard_reason, inline=True)
+                    self._stop_check(ledger, deliver, inline=True)
                 except Exception as exc:
                     ledger.incident('stop_check_failed', error=str(exc))
                 finally:
@@ -2143,10 +2310,7 @@ class App():
                             if getattr(session, 'terminal_mode', False):
                                 return self.replayer.type_text(prefix + correction, terminal_mode=True)
                             return self.replayer.type_text(prefix + correction)
-                        ledger.finish(
-                            lambda audio: self.transcription_worker.transcribe_chunk(audio, recovery=True),
-                            deliver, is_artifact=is_hallucination,
-                            discard_recovery=transcript_discard_reason)
+                        self._stop_check(ledger, deliver)
                     except Exception as exc:
                         ledger.incident('stop_check_failed', error=str(exc))
                     finally:

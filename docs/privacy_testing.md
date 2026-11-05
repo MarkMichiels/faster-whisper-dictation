@@ -67,8 +67,9 @@ for libraries, **not** a general network sandbox.
 Coverage includes context cleanup, one-shot prompt recovery, queue/sample-tail
 accounting, delivery failures, appended corrections, silent/caption rejection,
 standalone thanks rejection, thanks inside longer sentences, short repeated
-phrases, consecutive-session handling and
-bounded OOM diagnostics. Installer tests run a temporary source copy with a
+phrases, consecutive-session handling,
+bounded OOM diagnostics, the bounded OOM fallback at stop (GPU retry, on-demand
+CPU model, deadline) and the digital-silence alert. Installer tests run a temporary source copy with a
 separate HOME and fake venv/pip/systemctl commands; they cover missing venvs,
 optional CUDA directories, Python-version-aware paths and rerun/check behavior.
 They never install packages or change the real service. Read individual tests

@@ -28,6 +28,8 @@ recognition, this source adds:
 | Per-session RAM coverage ledger and stop correction path | Distinguish captured-but-undecoded ranges from delivery failures; append recovered material without silently editing earlier prose |
 | Energy/caption/repetition gates and punctuation formatting | Reduce invented text on silence and prompt pollution; heuristics can also reject literal or very quiet speech |
 | Bounded CUDA OOM snapshot | Show competing GPU allocations at the time of failure; diagnostics do not free memory or repair the model |
+| Stop-check OOM fallback: one longer GPU retry, then an on-demand CPU model | Give ranges lost to a lasting OOM a real second chance without a second resident GPU model; costs RAM and stop time, both bounded |
+| Digital-silence tone | Tell the speaker at once that the input delivers only exact zeros; cannot tell why (mute, source switch, USB) |
 | systemd installer with graphical-session lifecycle and revision check | One managed login service, predictable restart and detectable stale units; installer changes the desktop and is GPU-profile-specific |
 | Dedicated beep output streams; recorder starts before beep | Avoid one beep cancelling another and avoid waiting for the sound before starting capture; sound does not prove microphone readiness |
 | Offline logic/queue regressions | Test loss/recovery behaviour without recording, model downloads or desktop writes; not a hardware acceptance test |
@@ -120,9 +122,11 @@ The output gates operate on the whole chunk or whole recovery window:
 
 - Known caption/broadcaster/credit families and punctuation-only output are
   rejected; the code does not do arbitrary substring removal from normal prose.
-- Thanks-like phrases require silence evidence to be rejected: at least one
-  second of low voiced energy and a peak below -50 dBFS. Audible thanks are not
-  categorically discarded.
+- A chunk or window that is in its entirety a standalone thanks phrase
+  (`THANK_PHRASES`, case and punctuation ignored) is rejected at every audio
+  level, also when it was clearly spoken: audio statistics do not reliably
+  separate a real thanks from an invented one. A thanks inside a longer
+  sentence is kept.
 - A special short-repeat gate rejects exactly two identical multiword phrases
   (6–12 normalised words total) on 1–3 seconds of near-idle audio with zero
   voiced duration and RMS at most -60 dBFS.
@@ -139,6 +143,15 @@ lasts at least one second with less than 0.15 seconds of voiced frames. These
 are signal-level heuristics, not proof of speech absence; gain, quiet speech,
 noise and microphone dropouts affect them. Numeric diagnostics include RMS,
 peak, voiced duration, zero fraction and longest run of digital zeros.
+
+While recording, the ledger also tracks the current run of exact-zero samples.
+The first run of at least `DIGITAL_SILENCE_S` (2 s) in a session writes one
+`digital_silence` journal event (`start_s`, `zero_run_s`, `threshold_s`, no
+text or audio) and plays three equal short tones. Ordinary silence keeps a few
+LSB of noise and never produces such a run; ordinary recordings showed zero runs
+of at most about 0.2 s. The tone does not stop the session, and no screen
+message or pasted line is produced. `stop_summary` records `digital_silence`
+and `longest_zero_run_s`.
 
 ### Clipboard delivery
 
@@ -184,6 +197,24 @@ Each recovery window passes caption/energy checks **before** joining; pause-only
 recoveries are removed. Recovered text substantially repeating delivered nearby
 text is suppressed using ordered matching word runs (60% coverage threshold).
 This duplicate heuristic can also suppress a partly new recovery.
+
+A range that failed with a decoder error is retried after 200 ms. If a recovery
+decode raises a CUDA out-of-memory error, `OomRecovery` takes over for the rest
+of that stop check: one GPU retry after `GPU_WAIT_S` (2 s), and if that also
+runs out of memory, every remaining window is decoded by the same model on the
+CPU (int8, `CPU_THREADS` = 6, local files only). The CPU model is loaded only
+at that moment and released when the stop check ends; it never touches the GPU.
+`BUDGET_S` (60 s from the first OOM) is a hard ceiling on the extra wait: a CPU
+window runs on its own thread and is abandoned at the deadline, and no window
+starts that the slowest window so far could not finish in time. Abandoned or
+refused windows leave their range unresolved (`recovery_failed`), so the
+control line reports them. An abandoned thread finishes in the background with
+its own copy of one window and then releases the model. Journal events:
+`oom_recovery` (route, outcome, timings), `oom_recovery_summary` and
+`oom_recovery_released`, metadata only. Measured offline on a 16-core desktop:
+model load 1.5–5.4 s, 3.3–4.1 s per 10 s window, about 1.7–2.9 GB extra RAM
+while loaded, back to about +80 MB after release; 78 s of failed audio took
+35 s of stop check. A non-OOM decoder error gets no extra retry.
 
 Adjacent recovered ranges become one appended correction, quoting up to four
 words from neighbouring delivered text as anchors. The current labels are
