@@ -33,7 +33,9 @@ That is experience with an existing installation, not proof of a clean-machine
 rebuild. The code in this snapshot includes newer recovery/filter changes that
 have offline regression coverage, not a new full desktop acceptance test.
 Windows/macOS branches exist in the code, but this fork's complete paste and
-service setup is **not validated there**. Wayland is not an equivalent target.
+service setup is **not validated there**. The experimental [GNOME Wayland kernel
+path](docs/wayland.md) has offline coverage but still needs a real login test;
+selection release and the context badge are not yet supported there.
 CPU inference is selectable, but equal speed or desktop parity is not promised.
 
 ## Read in this order

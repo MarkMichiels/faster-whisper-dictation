@@ -9,14 +9,15 @@
 set -euo pipefail
 
 CHECK_ONLY=false
-case "${1:-}" in
-    "") ;;
-    --check) CHECK_ONLY=true ;;
-    *)
-        echo "Usage: $0 [--check]" >&2
-        exit 2
-        ;;
-esac
+WAYLAND=false
+[ "${XDG_SESSION_TYPE:-}" != wayland ] || WAYLAND=true
+for arg in "$@"; do
+    case "$arg" in
+        --check) CHECK_ONLY=true ;;
+        --wayland) WAYLAND=true ;;
+        *) echo "Usage: $0 [--check] [--wayland]" >&2; exit 2 ;;
+    esac
+done
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 SERVICE_NAME="spraakherkenning"
@@ -31,6 +32,10 @@ LEGACY_DEFAULT_LINK="$SERVICE_DIR/default.target.wants/$SERVICE_NAME.service"
 CONFIG_DIR="$HOME/.config/faster-whisper-dictation"
 CONFIG_FILE="$CONFIG_DIR/config.yaml"
 REVISION="$(git -C "$SCRIPT_DIR" rev-parse --short=12 HEAD 2>/dev/null || printf 'unknown')"
+
+EXTENSION_UUID=dictation-helper@faster-whisper-dictation
+EXTENSION_SOURCE="$SCRIPT_DIR/gnome-extension/$EXTENSION_UUID"
+EXTENSION_TARGET="${XDG_DATA_HOME:-$HOME/.local/share}/gnome-shell/extensions/$EXTENSION_UUID"
 
 detect_ld_path() {
     local site_packages library lib_dir
@@ -90,6 +95,18 @@ seed_config() {
 }
 
 render_service() {
+    if [ "${WAYLAND:-false}" = true ]; then
+        render_service_base | awk '
+            /^ExecStartPre=/ || /^ExecStartPost=/ { next }
+            /^Environment=DICTATION_REVISION=/ { print "Environment=XDG_SESSION_TYPE=wayland" }
+            { print }
+        '
+    else
+        render_service_base
+    fi
+}
+
+render_service_base() {
     cat << UNIT
 [Unit]
 Description=GPU-Accelerated Dutch Speech Recognition
@@ -156,6 +173,27 @@ WantedBy=graphical-session.target
 UNIT
 }
 
+check_wayland() {
+    if ! id -nG | tr ' ' '\n' | grep -qx input; then
+        echo 'Wayland requires input group membership (keylogger-level access); ask your administrator, then log in again.' >&2
+        return 1
+    fi
+    if $CHECK_ONLY; then
+        if ! diff -qr "$EXTENSION_SOURCE" "$EXTENSION_TARGET" >/dev/null 2>&1; then
+            echo 'NOT CURRENT: GNOME Dictation Helper is missing or differs' >&2
+            return 1
+        fi
+        if [ ! -x "$VENV_DIR/bin/python3" ] || ! "$VENV_DIR/bin/python3" -c 'import evdev' 2>/dev/null; then
+            echo 'NOT CURRENT: evdev is missing from the virtual environment' >&2
+            return 1
+        fi
+        LC_ALL=C gnome-extensions info "$EXTENSION_UUID" | grep -Eq 'State: (ENABLED|ACTIVE)' || {
+            echo 'NOT CURRENT: enable Dictation Helper after logging in again' >&2
+            return 1
+        }
+    fi
+}
+
 unit_is_current() {
     local expected_unit
     expected_unit="$(mktemp)"
@@ -196,6 +234,10 @@ unit_is_current() {
     return 0
 }
 
+if $WAYLAND; then
+    check_wayland || exit 1
+fi
+
 if $CHECK_ONLY; then
     detect_ld_path
     if unit_is_current; then
@@ -203,6 +245,13 @@ if $CHECK_ONLY; then
         exit 0
     fi
     exit 1
+fi
+
+if $WAYLAND; then
+    mkdir -p "$EXTENSION_TARGET"
+    install -m 0644 "$EXTENSION_SOURCE/metadata.json" "$EXTENSION_SOURCE/extension.js" "$EXTENSION_TARGET/"
+    echo "Installed $EXTENSION_UUID. Log out/in once, then run: gnome-extensions enable $EXTENSION_UUID"
+    echo 'Thumb buttons are NOT suppressed under Wayland; back/forward remains active.'
 fi
 
 # --- Cleanup legacy autostart ---
@@ -221,6 +270,10 @@ if [ ! -d "$VENV_DIR" ]; then
     echo "Virtual environment created and dependencies installed."
 else
     echo "Virtual environment already exists."
+fi
+
+if $WAYLAND; then
+    "$VENV_DIR/bin/python3" -m pip install -r "$SCRIPT_DIR/requirements-wayland.txt"
 fi
 
 # Discover libraries only after a new venv and its dependencies exist.

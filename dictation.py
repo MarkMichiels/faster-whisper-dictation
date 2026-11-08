@@ -11,8 +11,12 @@ import pyaudio
 import numpy as np
 from faster_whisper import WhisperModel
 from faster_whisper.vad import get_speech_timestamps, VadOptions, get_vad_model
-from pynput import keyboard
-from pynput import mouse
+WAYLAND: bool = os.environ.get('XDG_SESSION_TYPE') == 'wayland'
+if WAYLAND:
+    from wayland_io import keyboard, mouse
+else:
+    from pynput import keyboard
+    from pynput import mouse
 from transitions import Machine
 from coverage_ledger import (CoverageLedger, diagnostic, MAX_SECONDS, RATE, audio_stats, silent_audio,
                              HELD_FOR_REWRITE)
@@ -1236,6 +1240,8 @@ class KeyListener():
         self.callback = callback
         self.key = key
     def run(self):
+        if WAYLAND:
+            raise ValueError('Wayland supports only Right-Ctrl double-tap, not key combos')
         with keyboard.GlobalHotKeys({self.key : self.callback}) as h:
             h.join()
 
@@ -2036,7 +2042,8 @@ class App():
             diagnostic('rewrite_context', **context.journal())
             start_sound = 'rewrite_start_context' if context.text else 'rewrite_start'
             if context.text and CONTEXT_BADGE:
-                context_badge.launch(context.chars, log=diagnostic)
+                if not globals().get('WAYLAND', False):
+                    context_badge.launch(context.chars, log=diagnostic)
             self._plan_selection_release(session, context, started_at, read_at, read_done, previous)
 
         self.beep(start_sound, wait=False)
@@ -2066,7 +2073,7 @@ class App():
         released on a thread of its own, so the listener keeps seeing keys.
         """
         try:
-            if not RELEASE_SELECTION:
+            if globals().get('WAYLAND', False) or not RELEASE_SELECTION:
                 diagnostic('selection_release', fired=False, reason='disabled', wait_s=0)
                 return
             trace = getattr(self, 'input_trace', None)
@@ -2474,6 +2481,8 @@ class App():
         Separate from the thumb-button toggle, which only runs when buttons are
         configured. Without it a click is unknown and no selection is released.
         """
+        if WAYLAND:
+            return  # Selection release is deliberately deferred to the next WP.
         trace = self.input_trace
 
         def on_click(x, y, button, pressed):
@@ -2488,17 +2497,16 @@ class App():
             diagnostic('selection_release_mouse_unavailable', error=type(exc).__name__)
 
 
-def warn_if_wayland():
-    """Say plainly when global triggers cannot work in this session.
+if WAYLAND:
+    from wayland_io import bind
+    KeyboardReplayer, MultiTapKeyListener, MouseToggleListener = bind(
+        KeyboardReplayer, MultiTapKeyListener, MouseToggleListener)
 
-    pynput listens through X. Under a Wayland session it only sees input that
-    goes to Xwayland windows, so Ctrl_R and the thumb buttons stay silent in
-    every native Wayland app while the service still looks active.
-    """
-    if os.environ.get('XDG_SESSION_TYPE') == 'wayland':
-        print('WARNING: Wayland session detected. The hotkey and mouse buttons '
-              'only work in X11 windows. Log in with "Ubuntu on Xorg" '
-              '(or set WaylandEnable=false in /etc/gdm3/custom.conf).')
+
+def warn_if_wayland():
+    """Report the experimental Wayland backend and its deferred features."""
+    if WAYLAND:
+        print('Wayland: GNOME Dictation Helper + evdev; selection release and badge disabled.')
 
 
 if __name__ == "__main__":

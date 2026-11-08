@@ -1,0 +1,2 @@
+# Only needed for the GNOME Wayland backend. Clipboard still uses CopyQ/Xwayland.
+evdev>=1.9,<3
