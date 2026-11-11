@@ -192,6 +192,27 @@ class WaylandTests(unittest.TestCase):
             replay._set_clipboard.assert_called_with('recoverable')
             shell.return_value.shortcut.assert_not_called()
 
+    def test_xclip_fallback_target_per_backend(self):
+        """Wayland apps paste UTF8_STRING through Xwayland; a bare text/plain stays X11-only."""
+        base = self.ns['KeyboardReplayer']
+        cls, _, _ = w.bind(base, self.ns['MultiTapKeyListener'], self.ns['MouseToggleListener'])
+        calls = []
+
+        def run(argv, **kw):
+            calls.append(argv)
+            return types.SimpleNamespace(returncode=1 if argv[0] == 'copyq' else 0)
+        fake = types.SimpleNamespace(run=run, DEVNULL=subprocess.DEVNULL,
+                                     check_output=lambda argv, **kw: calls.append(argv) or b'tekst')
+        self.ns.update(subprocess=fake)
+        with patch.object(w, 'ShellClient'):
+            for replayer, target in ((base.__new__(base), 'text/plain'), (cls(), 'UTF8_STRING')):
+                calls.clear()
+                result = replayer._set_clipboard('tekst')
+                self.assertEqual((result['ok'], result['path']), (True, 'xclip'))
+                self.assertEqual(calls[-1], ['xclip', '-selection', 'clipboard', '-t', target])
+                self.assertTrue(replayer._clipboard_owned('tekst', None, 'xclip', None))
+                self.assertEqual(calls[-1], ['xclip', '-selection', 'clipboard', '-o', '-t', target])
+
     def test_x11_import_route_and_wayland_no_pynput(self):
         tree = ast.parse((ROOT / 'dictation.py').read_text())
         nodes = [n for n in tree.body if isinstance(n, ast.AnnAssign)]

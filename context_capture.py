@@ -11,6 +11,17 @@ Metadata (owner, TARGETS, TIMESTAMP) is read by a short-lived helper process
 (this file with --probe, python-xlib) so a hanging owner can be killed by a hard
 time-out; the text itself is read with xclip, also with a time-out.
 
+GNOME Wayland (D4 in docs/wayland.md): mutter mirrors PRIMARY and CLIPBOARD to
+Xwayland, so TARGETS and the text are still read the X way, but the mirror has
+no TIMESTAMP and is always owned by mutter. Age and origin then come from the
+Dictation Helper extension (capture(shell=...)): the time of the last owner
+change of that selection and the window focused at that moment. PRIMARY counts
+only when that window belongs to the program focused now (same process), so a
+selection made in another program is refused ('focus_elsewhere'); copy it with
+Ctrl+C to use it through CLIPBOARD. A PRIMARY owned by CopyQ (clipboard-to-
+selection sync: our own previous output) is refused as well. The extension
+never returns selection text.
+
 Long text: up to max_chars characters (default DEFAULT_MAX_CHARS; the caller
 passes the configured limit) are kept. Longer text keeps its beginning and its end, with
 TRUNCATED_MARK in between: a mail thread shows the oldest message on top, a
@@ -58,14 +69,20 @@ class Context:
     original_chars: Optional[int] = None
     # Origin of PRIMARY, for selection_release: the input focus window at the
     # probe and whether the PRIMARY owner is the same X client. No text.
-    focus_window: Optional[int] = None
+    # Wayland: a Meta.Window id string; owner_same_client then means "PRIMARY
+    # last changed while this same window had focus".
+    focus_window: Optional[Any] = None
     owner_same_client: Optional[bool] = None
+    backend: str = 'x11'
 
     def journal(self) -> dict[str, Any]:
         """Metadata only: never the text."""
-        return dict(source=self.source, chars=self.chars, age_s=self.age_s,
+        meta = dict(source=self.source, chars=self.chars, age_s=self.age_s,
                     truncated=self.truncated, original_chars=self.original_chars,
                     reasons=dict(self.reasons), owner_same_client=self.owner_same_client)
+        if self.backend != 'x11':
+            meta['backend'] = self.backend
+        return meta
 
 
 def shorten(text: str, max_chars: int) -> str:
@@ -132,20 +149,63 @@ def read_text(selection: str, run: Callable = subprocess.run,
     return data.decode('utf-8', errors='replace') if isinstance(data, bytes) else str(data)
 
 
+def shell_meta(selection: str, x_meta: Optional[dict[str, Any]], shell: Any
+               ) -> tuple[Optional[dict[str, Any]], Optional[str], dict[str, Any]]:
+    """Wayland: X metadata (owner, TARGETS) with age and origin from the shell.
+
+    Returns (meta for judge, reason or None, shell info). Fail closed: an
+    unreachable or outdated extension, no change seen, a cleared selection or
+    a PRIMARY owned by CopyQ give a reason. The focus rule follows in capture().
+    """
+    try:
+        info = shell.selection_info(selection)
+    except Exception:
+        return x_meta, 'shell_unavailable', {}
+    if not x_meta or not x_meta.get('owner') or info.get('state') == 'cleared':
+        return x_meta, 'empty', info
+    if info.get('state') != 'set' or info.get('age_s') is None:
+        return x_meta, 'no_change_seen', info
+    meta = dict(x_meta, age_s=info['age_s'])
+    if selection == 'primary' and COPYQ_OWNER_TARGET in (meta.get('targets') or []):
+        return meta, 'copyq_owner', info
+    return meta, None, info
+
+
 def capture(run: Callable = subprocess.run,
             max_ages: tuple[float, float] = (PRIMARY_MAX_AGE_S, CLIPBOARD_MAX_AGE_S),
-            max_chars: int = DEFAULT_MAX_CHARS) -> Context:
-    """Read the reply context once. Never raises."""
+            max_chars: int = DEFAULT_MAX_CHARS, shell: Any = None) -> Context:
+    """Read the reply context once. Never raises.
+
+    shell: the Wayland Dictation Helper client (wayland_io.ShellClient); None on X11.
+    """
     reasons: dict[str, str] = {}
+    backend = 'x11' if shell is None else 'wayland'
     meta = probe(run)
     if meta is None:
-        return Context(None, reasons={'primary': 'probe_failed', 'clipboard': 'probe_failed'})
-    focus = meta.get('focus') if isinstance(meta.get('focus'), int) else None
-    primary = meta.get('primary') or {}
-    same = primary.get('same_client') if isinstance(primary.get('same_client'), bool) else None
-    origin = dict(focus_window=focus, owner_same_client=same)
+        return Context(None, reasons={'primary': 'probe_failed', 'clipboard': 'probe_failed'},
+                       backend=backend)
+    if shell is None:
+        focus = meta.get('focus') if isinstance(meta.get('focus'), int) else None
+        primary = meta.get('primary') or {}
+        same = primary.get('same_client') if isinstance(primary.get('same_client'), bool) else None
+    else:
+        focus, same = None, None
+    origin = dict(focus_window=focus, owner_same_client=same, backend=backend)
     for selection, max_age in zip(('primary', 'clipboard'), max_ages):
+        if shell is not None:
+            sel_meta, reason, info = shell_meta(selection, meta.get(selection), shell)
+            meta[selection] = sel_meta
+            if selection == 'primary':
+                focus = info.get('focus_window')
+                same = (bool(focus) and info.get('change_window') == focus
+                        and info.get('state') == 'set') if info else None
+                origin.update(focus_window=focus, owner_same_client=same)
+            if reason:
+                reasons[selection] = reason
+                continue
         reason = judge(selection, meta.get(selection), max_age)
+        if not reason and shell is not None and selection == 'primary' and not info.get('same_app'):
+            reason = 'focus_elsewhere'
         if reason:
             reasons[selection] = reason
             continue

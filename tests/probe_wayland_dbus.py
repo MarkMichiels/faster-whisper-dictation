@@ -23,14 +23,24 @@ const Clutter = {
         create_virtual_device: () => ({notify_keyval() {}})})}),
 };
 class Extension {}
+const Meta = {SelectionType: {SELECTION_PRIMARY: 0, SELECTION_CLIPBOARD: 1}};
+const St = {Label: class { constructor(p) { Object.assign(this, p); }
+    get_preferred_width() { return [0, 100]; } set_position() {} destroy() {} }};
+const Main = {layoutManager: {uiGroup: {add_child() {}}}};
+let ownerChanged = null;
 const global = {
-    display: {focus_window: {get_id: () => 42, get_wm_class: () => 'editor'}},
+    display: {focus_window: {get_id: () => 42, get_wm_class: () => "it's true", get_pid: () => 7,
+                             get_monitor: () => 0},
+              get_selection: () => ({connect: (_n, fn) => { ownerChanged = fn; return 1; }, disconnect() {}}),
+              get_current_monitor: () => 0,
+              get_monitor_geometry: () => ({x: 0, y: 0, width: 800, height: 600})},
     get_window_actors: () => [], get_current_time: () => 100,
 };
 """
 SUFFIX = """
 const helper = new DictationHelper();
 helper.enable();
+ownerChanged(null, Meta.SelectionType.SELECTION_PRIMARY, {});
 const loop = new GLib.MainLoop(null, false);
 GLib.timeout_add(GLib.PRIORITY_DEFAULT, 20000, () => { loop.quit(); return GLib.SOURCE_REMOVE; });
 loop.run();
@@ -50,10 +60,19 @@ def inside():
         subprocess.run(['gdbus', 'wait', '--session', '--timeout', '5', BUS],
                        check=True, timeout=7)
         client = ShellClient()
-        assert client.focus() == ('42', 'editor')
+        assert client.focus() == ('42', "it's true")
         assert client.activate('999') is False
-        assert client._gdbus('SelectionInfo') == (False,)
-        assert client._gdbus('ShowBadge', '3') == ()
+        primary = client.selection_info('primary')
+        assert (primary['state'], primary['change_window'], primary['focus_window'],
+                primary['same_app']) == ('set', '42', '42', True), primary
+        assert 0 <= primary['age_s'] < 10, primary
+        assert client.selection_info('clipboard') == dict(
+            state='unknown', age_s=None, change_window=None, focus_window='42', same_app=False)
+        result = subprocess.run(['gdbus', 'call', '--session', '--dest', BUS,
+            '--object-path', PATH, '--method', BUS + '.SelectionInfo', 'dnd'],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=3)
+        assert result.returncode != 0
+        client.badge(3)
         for name in ('paste', 'paste_terminal', 'ctrl_home'):
             client.shortcut(name)
         # Bypass the Python allowlist to prove the service refuses arbitrary input.
@@ -61,7 +80,7 @@ def inside():
             '--object-path', PATH, '--method', BUS + '.SendShortcut', 'Return'],
             stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=3)
         assert result.returncode != 0
-        print('PASS: actual GJS/Gio XML export and Python gdbus transport, three shortcuts, server rejection')
+        print('PASS: actual GJS/Gio XML export and Python gdbus transport, selection metadata, badge, three shortcuts, server rejection')
     finally:
         if child.poll() is None:
             subprocess.run(['ps', '-o', 'pid,args', '-p', str(child.pid)], check=True)

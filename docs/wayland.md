@@ -37,9 +37,10 @@ declares GNOME 46–50; that is not a claim that all five versions were tested.
   every device after startup waits for hotplug; no readable devices at startup
   fails with an input-access message. SYN_DROPPED clears state and ignores
   events through SYN_REPORT; a fresh press is required afterwards.
-- The context badge and automatic selection release are deliberately disabled.
-  Context capture still uses the existing Xwayland best-effort reader; PRIMARY
-  age/owner metadata for native windows is not yet reliable.
+- Rewrite reply context, Ctrl+A selection release and the context badge work
+  through the helper; see *Selection context* below. The xclip clipboard
+  fallback offers `UTF8_STRING` on Wayland (a bare `text/plain` written
+  through Xwayland does not paste into native GTK apps).
 
 ## Extension interface and safety
 
@@ -52,10 +53,10 @@ Object: `/org/gnome/Shell/Extensions/DictationHelper`.
 | GetFocus | `() -> (s, s)` | Meta.Window id as string, wm_class; empty strings if no focus |
 | Activate | `(s) -> (b)` | Request activation of an existing numeric id |
 | SendShortcut | `(s) -> ()` | Only `paste`, `paste_terminal`, `ctrl_home`; everything else errors |
-| ShowBadge | `(u) -> ()` | No-op placeholder |
-| SelectionInfo | `() -> (b)` | Always false/unknown placeholder |
+| ShowBadge | `(u) -> ()` | Show "Context opgepakt: N tekens" for 1.5 s, top right of the focused window's monitor; only the number is sent |
+| SelectionInfo | `(s) -> (s, d, s, s, b)` | For `primary` or `clipboard` only: state (`set`, `cleared`, `unknown`), seconds since the owner last changed (-1 if unknown), window id focused at that change, window id focused now, and whether both belong to the same process |
 
-No selection text or window titles cross this interface. Every process on the
+No selection text, MIME types or window titles cross this interface. Every process on the
 session bus can request these methods, including paste into the focused app.
 This is not a security boundary against another process in the same account.
 Python verifies target focus after activation and again before sending paste;
@@ -67,6 +68,38 @@ The Shell creates a Clutter virtual keyboard. The allowlist is a Map, not a
 prototype-bearing object lookup. Only the keyvals for Ctrl+V, Ctrl+Shift+V and
 Ctrl+Home exist in it. Pressed keys are released in reverse order in a finally
 block. Disabling unexports D-Bus and drops the virtual device.
+
+## Selection context
+
+The helper listens to `Meta.Selection` `owner-changed` for PRIMARY and
+CLIPBOARD and records, per selection, a monotonic time, the focused window id
+and its process id. It never reads or stores the selection content.
+`context_capture` still reads owner, TARGETS and text from Xwayland (mutter
+mirrors both selections there); age and origin come from `SelectionInfo`.
+The reasons are logged in the `rewrite_context` journal line with
+`backend: wayland`:
+
+| Reason | Meaning |
+| --- | --- |
+| `shell_unavailable` | Helper missing, disabled or an old version without `SelectionInfo` |
+| `no_change_seen` | No owner change since the helper started (fail closed) |
+| `empty` | No owner, or the selection was cleared |
+| `copyq_owner` | CopyQ owns the selection (also for PRIMARY) |
+| `too_old` | Same limits as X11: PRIMARY 20 s, CLIPBOARD 120 s (configurable) |
+| `focus_elsewhere` | PRIMARY changed while another program had focus |
+
+The PRIMARY focus rule is stricter than on X11: the selection must have been
+made while the program that has focus at the start had focus (same process).
+Selecting in one program and starting in another therefore gives no context.
+Workaround: copy with Ctrl+C; CLIPBOARD has no focus rule, only its age limit.
+
+Selection release after Ctrl+A follows the X11 rules (`docs/rewrite_mode.md`).
+The Ctrl+A trace comes from evdev with the `be`/`us` keymap; every button code
+(touchpad taps included) counts as a mouse press. The focused-window id at
+Ctrl+A, at the start and while waiting comes from `GetFocus`; "same X client"
+becomes "PRIMARY changed in the focused window". Ctrl+Home goes through the
+`ctrl_home` shortcut of the helper. Terminals are recognised by their Wayland
+app id (for example `org.gnome.terminal`, `org.gnome.ptyxis`, `kitty`).
 
 ## Installation and rollout (manual approval required)
 
@@ -85,7 +118,11 @@ instances at once.
    when the installer itself runs under Wayland. This installs evdev in the
    checkout venv and copies the two extension files. It never changes input
    groups. It renders a Wayland unit with no xinput pre/post hooks.
-4. Log out/in to load a newly installed extension. Choose Ubuntu (Wayland),
+4. Log out/in to load a newly installed **or updated** extension: GNOME on
+   Wayland cannot reload extension code in a running session, so an updated
+   helper (for example the one adding `SelectionInfo`) is active only after
+   the next login. Until then capture reports `shell_unavailable` and no
+   selection is released. Choose Ubuntu (Wayland),
    not Ubuntu on Xorg. Run
    `gnome-extensions enable dictation-helper@faster-whisper-dictation`.
    After first installation activation is an explicit post-login step; the
@@ -96,6 +133,11 @@ instances at once.
    the extension is enabled. `bash install.sh --check` should now pass.
 6. Complete the acceptance matrix below before upgrading other machines.
    Repeat on each target GNOME version; shell-version metadata is insufficient.
+
+To turn off only the selection features, set `rewrite.context.release_selection:
+false` and/or `rewrite.context.badge: false` in the settings file and restart
+the service. To return to the previous code, check out the previous commit,
+run `bash install.sh --wayland`, log out/in and restart the service.
 
 To roll back after approval: log into Ubuntu on Xorg, reinstall the previous
 X11 checkout's unit and disable the helper extension. The Wayland installer
@@ -128,9 +170,13 @@ clipboard contents, real input traces or journal transcription payloads.
    too; use an empty disposable tab. Disable these triggers if unacceptable.
    Unplug/replug a keyboard and mouse while idle, and with a start modifier
    held: no stuck modifier or spurious double-tap. Try zero devices then replug.
-6. For the keymap trace unit test, Ctrl+A corresponds to physical Q on Belgian
-   AZERTY. No selection release or badge is expected in this part. Do not treat
-   missing native PRIMARY age/owner metadata as tested functionality.
+6. Reply context, with synthetic text: in a mail or document, press Ctrl+A and
+   start with Left-Alt + double-tap Right-Ctrl. Expect the high pip, the badge
+   and, after releasing Alt, the caret at the top; the rewrite is pasted above
+   the original. A mouse selection gives context but is left as is
+   (`no_select_all`). A selection older than 20 s gives `too_old`. A selection
+   made in another program gives `focus_elsewhere`. In a terminal the context
+   is taken but nothing is sent (`terminal`). Check only the journal metadata.
 7. Keep the X11 rollback until repeated real native-app pastes and CopyQ
    recovery have passed. Only then authorize the next machine/OS trial.
 
@@ -149,6 +195,21 @@ python tests/probe_wayland_dbus.py
 
 The last probe runs actual GJS/Gio on a private D-Bus, with a fake compositor:
 this verifies XML marshalling and Python transport, **not** GNOME loading.
+
+`python tests/probe_wayland_nested.py --out DIR` runs the real GNOME Shell
+(`--nested --wayland`) inside its own Xvfb, with a private session bus, a
+private stand-in system bus (no logind or display manager), a stub for the
+systemd user manager (the shell starts an X11 services target before
+Xwayland is usable), a private HOME with only the helper enabled, and CopyQ
+shadowed by a failing stub. Two synthetic GTK4 editors and kitty run inside.
+The real fork code (App.start, context capture, selection release, badge,
+paste) runs against it; keys reach the apps via xdotool on that Xvfb and the
+same keys go as synthetic evdev events into the input hub, which opens no
+device. The shell runs under strace; the result lists the `/dev` paths it
+opened. Mutter may take display `:0` when free; the probe accepts the nested
+display only when its lock file belongs to a child of the nested shell.
+Run it with `DISPLAY`, `WAYLAND_DISPLAY`, `DBUS_SESSION_BUS_ADDRESS` and
+`XAUTHORITY` unset.
 The optional `python tests/probe_wayland_shell.py` requires working unprivileged
 bubblewrap namespaces. It hides host input/DRM/runtime sockets, uses a private
 HOME and D-Bus, and runs headless GNOME with hard deadlines and exact-child-PID

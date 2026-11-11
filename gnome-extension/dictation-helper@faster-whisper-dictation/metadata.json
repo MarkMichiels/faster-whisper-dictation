@@ -1,7 +1,7 @@
 {
   "uuid": "dictation-helper@faster-whisper-dictation",
   "name": "Dictation Helper",
-  "description": "Focus metadata and three allowlisted shortcuts for dictation. No selection text.",
+  "description": "Focus and selection-change metadata, three allowlisted shortcuts and a context badge for dictation. No selection text.",
   "shell-version": ["46", "47", "48", "49", "50"],
-  "version": 1
+  "version": 2
 }

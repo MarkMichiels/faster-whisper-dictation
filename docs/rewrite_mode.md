@@ -80,7 +80,8 @@ still apply. Word checks count visible body words, not markup.
 
 CopyQ first records final plain text in history, then `copyq copy` offers both
 `text/plain` and `text/html` together. The target app chooses; a plain field
-gets one line. If CopyQ fails, xclip offers only one-line plain text. Two low
+gets one line. If CopyQ fails, xclip offers only one-line plain text
+(`text/plain` on X11, `UTF8_STRING` on Wayland). Two low
 tones report lost formatting. No old HTML is reused on a following plain write.
 
 WM_CLASS and `output.extra_terminal_classes` choose **only the shortcut**:
@@ -181,6 +182,22 @@ top. A spreadsheet treats Ctrl+Home as "go to A1". Turn the feature off with
 The app keeps a small record of key and mouse presses for this: only times,
 the focused window id at Ctrl+A, and whether Ctrl+A was pressed. No key text
 and no pointer positions.
+
+### On GNOME Wayland
+
+The same flow works with the Dictation Helper extension (`docs/wayland.md`).
+The helper reports when PRIMARY or CLIPBOARD last changed and which window
+had focus then; the text is still read through Xwayland. Differences:
+
+- Rule 5 becomes "PRIMARY changed while the focused window had focus"; rule 6
+  uses the helper's change time instead of the X selection timestamp.
+- Reply context from PRIMARY requires that the selection was made in the
+  program that has focus at the start (select the mail, click into the reply
+  field of the same program: fine). A selection made in another program is
+  refused (`focus_elsewhere`); copy it with Ctrl+C instead.
+- Ctrl+Home and the badge come from the helper (virtual keyboard, Shell
+  label), not from XTest or a separate window.
+- An updated helper is active only after logging out and in again.
 
 ## Reply context
 

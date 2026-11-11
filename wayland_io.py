@@ -13,6 +13,44 @@ from typing import Any, Callable
 BUS = 'org.gnome.Shell.Extensions.DictationHelper'
 PATH = '/org/gnome/Shell/Extensions/DictationHelper'
 SHORTCUTS = frozenset(('paste', 'paste_terminal', 'ctrl_home'))
+SELECTIONS = frozenset(('primary', 'clipboard'))
+
+
+def parse_gvariant_text(text: str) -> Any:
+    """Parse gdbus call output (a tuple of strings, numbers and booleans).
+
+    gdbus prints booleans as true/false; they are translated outside quoted
+    strings only, so a window class can never change the structure.
+    """
+    import ast
+    out, quote, escape = [], None, False
+    i = 0
+    while i < len(text):
+        ch = text[i]
+        if quote:
+            out.append(ch)
+            if escape:
+                escape = False
+            elif ch == '\\':
+                escape = True
+            elif ch == quote:
+                quote = None
+            i += 1
+            continue
+        if ch in ('"', "'"):
+            quote = ch
+            out.append(ch)
+            i += 1
+            continue
+        for word, value in (('true', 'True'), ('false', 'False')):
+            if text.startswith(word, i) and not text[i + len(word):i + len(word) + 1].isalnum():
+                out.append(value)
+                i += len(word)
+                break
+        else:
+            out.append(ch)
+            i += 1
+    return ast.literal_eval(''.join(out))
 
 
 class ShellClient:
@@ -22,14 +60,11 @@ class ShellClient:
     @staticmethod
     def _gdbus(method: str, *args: str) -> tuple[Any, ...]:
         # gdbus has a bounded timeout; output contains metadata only.
-        import ast
         result = subprocess.check_output([
             'gdbus', 'call', '--session', '--dest', BUS, '--object-path', PATH,
             '--method', BUS + '.' + method, *map(str, args)], timeout=3,
             stderr=subprocess.DEVNULL).decode().strip()
-        if result in ('(true,)', '(false,)'):
-            return (result == '(true,)',)
-        return ast.literal_eval(result)
+        return parse_gvariant_text(result)
 
     def focus(self) -> tuple[str, str]:
         wid, wm_class = self._call('GetFocus')
@@ -42,6 +77,27 @@ class ShellClient:
         if name not in SHORTCUTS:
             raise ValueError('shortcut not allowed')
         self._call('SendShortcut', name)
+
+    def selection_info(self, name: str) -> dict[str, Any]:
+        """When the selection owner last changed and the focus then and now. No text.
+
+        state: 'set', 'cleared' or 'unknown' (no change seen since the helper
+        was enabled). same_app: the window focused at the change and the one
+        focused now belong to one process (or are the same window).
+        """
+        if name not in SELECTIONS:
+            raise ValueError('selection not allowed')
+        state, age, change_window, focus_window, same_app = self._call('SelectionInfo', name)
+        if state not in ('set', 'cleared', 'unknown'):
+            raise ValueError('unexpected selection state')
+        age = float(age)
+        return dict(state=state, age_s=round(age, 3) if age >= 0 else None,
+                    change_window=str(change_window) or None,
+                    focus_window=str(focus_window) or None, same_app=bool(same_app))
+
+    def badge(self, chars: int) -> None:
+        """Show the context badge; only the number of characters is sent."""
+        self._call('ShowBadge', str(max(0, int(chars))))
 
 
 class Key(enum.Enum):
@@ -124,8 +180,7 @@ class InputHub:
         return SimpleNamespace(vk=ord(char) if char else -code, char=char)
 
     def event(self, path: str, event: Any) -> None:
-        # SYN_DROPPED: discard state, not a new trigger. Selection release is
-        # disabled for this kernel-only backend until the selection WP.
+        # SYN_DROPPED: discard state, not a new trigger.
         if event.type == 0 and event.code == 3:
             self.release(path)
             self.desynced.add(path)
@@ -154,6 +209,9 @@ class InputHub:
             if any(code in keys for keys in self.held.values()):
                 return
         if code >= 272:
+            # Every button code counts for the selection-release trace,
+            # touchpad contacts (BTN_TOUCH, BTN_TOOL_*) included: a tap-to-click
+            # never shows up as BTN_LEFT at evdev level.
             try:
                 button = Button(code)
             except ValueError:
@@ -227,6 +285,10 @@ def bind(replayer: type, tap_listener: type, mouse_listener: type) -> tuple[type
     hub = InputHub()
 
     class WaylandReplayer(replayer):
+        # xclip fallback: GTK4/Chromium on Wayland paste UTF8_STRING via
+        # Xwayland, not a bare text/plain (nested GNOME proof).
+        XCLIP_TARGET = 'UTF8_STRING'
+
         def __init__(self, callback: Callable[..., Any] | None = None) -> None:
             self.callback = callback
             self.target_wid = None
@@ -269,6 +331,13 @@ def bind(replayer: type, tap_listener: type, mouse_listener: type) -> tuple[type
         def send_ctrl_home(self) -> None:
             self.shell.shortcut('ctrl_home')
 
+        def focus_id(self) -> str | None:
+            """Focused Meta.Window id for selection_release; raises when unknown."""
+            return self.shell.focus()[0] or None
+
+        def show_badge(self, chars: int) -> None:
+            self.shell.badge(chars)
+
     class WaylandTap(tap_listener):
         def run(self) -> None:
             if self.key != Key.ctrl_r:
@@ -282,4 +351,11 @@ def bind(replayer: type, tap_listener: type, mouse_listener: type) -> tuple[type
                 hub.mouse_callbacks.append(self.on_click)
             return self
 
+        @staticmethod
+        def add_press_callback(callback: Callable[..., Any]) -> None:
+            """Always-on press record for selection_release (no positions)."""
+            hub.mouse_callbacks.append(callback)
+
+    # The shared hub, for synthetic-event proofs that must not open devices.
+    WaylandTap.hub = WaylandMouse.hub = hub
     return WaylandReplayer, WaylandTap, WaylandMouse

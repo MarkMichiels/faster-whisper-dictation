@@ -1052,7 +1052,14 @@ class KeyboardReplayer():
     # Terminals paste with Ctrl+Shift+V; GUI apps with Ctrl+V.
     TERMINAL_CLASSES = {'kitty', 'gnome-terminal', 'konsole', 'xterm',
                         'alacritty', 'terminator', 'st', 'wezterm', 'tilix',
-                        'urxvt', 'rxvt'}
+                        'urxvt', 'rxvt',
+                        # Wayland app ids as GNOME reports them (lowercased)
+                        'org.gnome.terminal', 'org.gnome.ptyxis', 'org.gnome.console', 'kgx',
+                        'com.mitchellh.ghostty', 'org.wezfurlong.wezterm', 'foot'}
+
+    # The one target the xclip fallback offers. Wayland overrides it: mutter's
+    # bridge hands a bare text/plain to Wayland apps as nothing pasteable.
+    XCLIP_TARGET = 'text/plain'
 
     def _set_clipboard(self, text: str, html: str | None = None) -> dict:
         """Place text on the system clipboard AND into CopyQ history.
@@ -1095,7 +1102,7 @@ class KeyboardReplayer():
             result['copyq_error'] = type(exc).__name__
             diagnostic('copyq_failure', **result)
         try:
-            command = subprocess.run(['xclip', '-selection', 'clipboard', '-t', 'text/plain'],
+            command = subprocess.run(['xclip', '-selection', 'clipboard', '-t', self.XCLIP_TARGET],
                                      input=text.encode('utf-8'), timeout=3, check=False,
                                      stderr=subprocess.DEVNULL)
             result['xclip'] = command.returncode
@@ -1124,7 +1131,7 @@ class KeyboardReplayer():
                              b'text/html' not in read('?').splitlines()))
             if path == 'xclip':
                 return subprocess.check_output(
-                    ['xclip', '-selection', 'clipboard', '-o', '-t', 'text/plain'],
+                    ['xclip', '-selection', 'clipboard', '-o', '-t', self.XCLIP_TARGET],
                     timeout=2, stderr=subprocess.DEVNULL) == text.encode('utf-8')
         except Exception:
             pass
@@ -2054,15 +2061,20 @@ class App():
         if rewrite_mode:
             # Read once, now: after the recorder (no audio lost) and before
             # anything of this session pastes. Never read again.
-            ages = {} if CONTEXT_MAX_AGES is None else dict(max_ages=CONTEXT_MAX_AGES)
+            options = {} if CONTEXT_MAX_AGES is None else dict(max_ages=CONTEXT_MAX_AGES)
             read_at = time.monotonic()
-            context = context_capture.capture(max_chars=self.rewrite_config.context_max_chars, **ages)
+            # Wayland: age and origin of the selection come from the shell extension.
+            if globals().get('WAYLAND', False):
+                options['shell'] = getattr(self.replayer, 'shell', None)
+            context = context_capture.capture(max_chars=self.rewrite_config.context_max_chars, **options)
             read_done = time.monotonic()
             session.context = context.text
             diagnostic('rewrite_context', **context.journal())
             start_sound = 'rewrite_start_context' if context.text else 'rewrite_start'
             if context.text and CONTEXT_BADGE:
-                if not globals().get('WAYLAND', False):
+                if globals().get('WAYLAND', False):
+                    self._shell_badge(context.chars)
+                else:
                     context_badge.launch(context.chars, log=diagnostic)
             self._plan_selection_release(session, context, started_at, read_at, read_done, previous)
 
@@ -2086,6 +2098,25 @@ class App():
 
         return True
 
+    def _shell_badge(self, chars):
+        """Wayland: the extension draws the badge. Fire and forget; never raises."""
+        def run():
+            try:
+                self.replayer.show_badge(chars)
+                diagnostic('context_badge', started=True, backend='shell')
+            except Exception as exc:
+                diagnostic('context_badge', started=False, backend='shell', error=type(exc).__name__)
+        try:
+            threading.Thread(target=run, daemon=True).start()
+        except Exception as exc:
+            diagnostic('context_badge', started=False, backend='shell', error=type(exc).__name__)
+
+    def _focus_reader(self):
+        """Focus source for selection_release: X input focus, or the shell's window id."""
+        if globals().get('WAYLAND', False):
+            return self.replayer.focus_id
+        return selection_release.focus_window
+
     def _plan_selection_release(self, session, context, started_at, read_at, read_done, previous):
         """Release a Ctrl+A selection taken as context (selection_release). Never raises.
 
@@ -2093,7 +2124,7 @@ class App():
         released on a thread of its own, so the listener keeps seeing keys.
         """
         try:
-            if globals().get('WAYLAND', False) or not RELEASE_SELECTION:
+            if not RELEASE_SELECTION:
                 diagnostic('selection_release', fired=False, reason='disabled', wait_s=0)
                 return
             trace = getattr(self, 'input_trace', None)
@@ -2119,7 +2150,8 @@ class App():
                 result = selection_release.wait_and_release(
                     trace, started_at, context.focus_window, listener.modifiers_held,
                     self.replayer.send_ctrl_home,
-                    session_active=lambda: self.session is session and self.active)
+                    session_active=lambda: self.session is session and self.active,
+                    focus=self._focus_reader())
                 diagnostic('selection_release', **result)
             threading.Thread(target=run, daemon=True).start()
         except Exception as exc:
@@ -2485,7 +2517,7 @@ class App():
                 default_language=self.args.language,
                 shift_language=self.args.shift_language,
             )
-            self.input_trace = selection_release.InputTrace()
+            self.input_trace = selection_release.InputTrace(focus=self._focus_reader())
             keylistener.trace = self.input_trace
             self.key_listener = keylistener
             self.input_trace.set_known(keys=True)
@@ -2508,17 +2540,19 @@ class App():
         Separate from the thumb-button toggle, which only runs when buttons are
         configured. Without it a click is unknown and no selection is released.
         """
-        if WAYLAND:
-            return  # Selection release is deliberately deferred to the next WP.
         trace = self.input_trace
 
         def on_click(x, y, button, pressed):
             if pressed:
                 trace.mouse_press()
         try:
-            listener = mouse.Listener(on_click=on_click)
-            listener.daemon = True
-            listener.start()
+            if WAYLAND:
+                # The evdev hub reads every button device, touchpads included.
+                MouseToggleListener.add_press_callback(on_click)
+            else:
+                listener = mouse.Listener(on_click=on_click)
+                listener.daemon = True
+                listener.start()
             trace.set_known(mouse=True)
         except Exception as exc:
             diagnostic('selection_release_mouse_unavailable', error=type(exc).__name__)
@@ -2531,9 +2565,9 @@ if WAYLAND:
 
 
 def warn_if_wayland():
-    """Report the experimental Wayland backend and its deferred features."""
+    """Report the experimental Wayland backend."""
     if WAYLAND:
-        print('Wayland: GNOME Dictation Helper + evdev; selection release and badge disabled.')
+        print('Wayland: GNOME Dictation Helper + evdev; selection age, release and badge via the helper.')
 
 
 if __name__ == "__main__":
