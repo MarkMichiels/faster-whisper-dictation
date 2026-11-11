@@ -1984,8 +1984,8 @@ class App():
         language: transcription language for THIS session, chosen at start
         time from the hotkey modifier (Left-Shift held -> English, otherwise
         the configured default). Set every session so nothing is remembered.
-        None means auto-detect. _UNSET (combo-mode toggle path) keeps the
-        currently configured language untouched.
+        None means auto-detect. _UNSET keeps the worker's current language;
+        toggle() (thumb button, key combo) passes the configured -l instead.
 
         rewrite_mode: Left-Alt or Left-Ctrl was held. Left-Ctrl additionally
         forces terminal mode (no HTML, Ctrl+Shift+V). Without a usable configuration the
@@ -2192,7 +2192,13 @@ class App():
         self.beep("start_recording", wait=False)
 
     def toggle(self):
-        return self.start() or self.stop()
+        """Mouse thumb button (and key-combo mode): stop a running session, or
+        start ordinary dictation in the configured language (-l). Never the
+        language of the previous session, which a Left-Shift start leaves on
+        the shared transcription worker."""
+        if self.active:
+            return self.stop()
+        return self.start(self.args.language)
 
     def _session_from_attributes(self):
         return self.Session(self.transcription_queue, self.typing_queue,
@@ -2209,8 +2215,9 @@ class App():
         if session.language is not _UNSET:
             self.transcription_worker.language = session.language
         self.transcription_worker.reset_context()
-        if session.target_wid is not None:
-            self.replayer.target_wid = session.target_wid
+        # Always this session's window, also when none was found: an unknown
+        # target refuses the paste instead of reusing the previous session's.
+        self.replayer.target_wid = session.target_wid
 
     def _transcription_loop(self, session=None):
         """Consumer: takes audio chunks from transcription_queue, transcribes, puts text on typing_queue.

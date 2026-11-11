@@ -1076,3 +1076,63 @@ class EnglishRewriteTests(AppStart, unittest.TestCase):
                                                context_capture.PRIMARY_MAX_AGE_S), 'too_old')
         self.assertIsNone(context_capture.judge('primary', dict(owner=True, targets=[], age_s=8),
                                                 context_capture.PRIMARY_MAX_AGE_S))
+
+
+class SessionCarryOverTests(AppStart, unittest.TestCase):
+    """Nothing of one session may steer the next one, whatever started it."""
+
+    def run_session(self, app, starter):
+        out = io.StringIO()
+        answer = lambda cfg, body, timeout: llm_answer('Herschreven tekst over de pomp.')
+        with patch.object(rewrite, 'http_call', answer), contextlib.redirect_stdout(out):
+            self.assertTrue(starter())
+            session = app.session
+            self.assertTrue(app.stop())
+            self.assertTrue(session.done.wait(5))
+        records = [json.loads(line.split(' ', 1)[1]) for line in out.getvalue().splitlines()
+                   if line.startswith('DCT-COVERAGE ')]
+        return session, next(r for r in records if r['kind'] == 'session_start')
+
+    def test_thumb_button_after_shift_dictation_is_dutch(self):
+        app, events = self.start_app(config(), None, windows=('win-1', 'win-2', 'win-3'))
+        app.args.language = 'nl'
+        keys = {'shift': True, 'alt': False, 'ctrl': False}
+        session, start = self.run_session(app, lambda: app.start('en', False, keys))
+        self.assertEqual((start['language'], app.transcription_worker.language), ('en', 'en'))
+        session, start = self.run_session(app, app.toggle)  # thumb button
+        self.assertEqual((start['mode'], start['language']), ('plain', 'nl'))
+        self.assertEqual(app.transcription_worker.language, 'nl')
+        app.args.language = None  # -l unset: auto-detect, still not the previous 'en'
+        self.run_session(app, lambda: app.start('en', False, keys))
+        session, start = self.run_session(app, app.toggle)
+        self.assertEqual(start['language'], 'auto')
+        self.assertIsNone(app.transcription_worker.language)
+
+    def test_toggle_while_recording_only_stops(self):
+        app, events = self.start_app(config(), None)
+        app.args.language = 'nl'
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertTrue(app.toggle())
+            session = app.session
+            self.assertTrue(app.toggle())
+            self.assertTrue(session.done.wait(5))
+        self.assertIs(app.session, session)
+        self.assertFalse(app.active)
+
+    def test_paste_target_never_from_previous_session(self):
+        app, events = self.start_app(config(), None, windows=('win-A', None, 'win-B', None, None))
+        app.args.language = 'nl'
+        self.run_session(app, lambda: app.start('nl'))
+        self.assertIn(('paste', 'gewone tekst', 'win-A'), events)
+        del events[:]
+        self.run_session(app, lambda: app.start('nl'))  # no active window found at start
+        pastes = [e for e in events if e[0] == 'paste']
+        self.assertTrue(pastes)
+        self.assertTrue(all(e[2] is None for e in pastes), pastes)
+        # Rewrite: neither a start nor a stop window -> no earlier window either.
+        self.run_session(app, lambda: app.start('nl'))  # win-B
+        del events[:]
+        self.run_session(app, lambda: app.start('nl', True, {'alt': True}))
+        pastes = [e for e in events if e[0] == 'paste']
+        self.assertTrue(pastes)
+        self.assertTrue(all(e[2] is None for e in pastes), pastes)
