@@ -106,6 +106,8 @@ SCHEMA: tuple[Setting, ...] = (
        dest='context_chars', flag='--context-chars', low=0),
     _s('transcription.vad_filter', 'bool', False, 'Gate decoding with VAD (off: the phrase filter is used).',
        dest='transcribe_vad', flag='--transcribe-vad'),
+    _s('recognition.replacements_file', 'str?', None, 'Path of a replacement list (wrong form -> right form) '
+       'applied to every recognised chunk; null = none.'),
     _s('output.hallucination_filter', 'bool', True, 'Drop chunks that are only a known silence artefact.',
        dest='no_hallucination_filter', flag='--no-hallucination-filter', invert=True),
     _s('output.space_rule_runs', 'bool', True, "Type '***' as '* * *' so it never renders as Markdown.",

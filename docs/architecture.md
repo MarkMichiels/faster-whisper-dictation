@@ -120,6 +120,12 @@ not allowed to replace useful first-pass words indiscriminately with a worse
 result. A decoder exception propagates to the range's error accounting instead
 of being an unlimited in-place retry.
 
+After the artefact clean-up, an optional fixed replacement list
+(`recognition.replacements_file`) rewrites known mishearings of names on every
+chunk, including recovery windows. Pasting, the rolling prompt, stop-check
+corrections and rewrite mode all see the replaced text; the raw decode is kept
+as heard. See [Replacement list](configuration.md#replacement-list).
+
 The output gates operate on the whole chunk or whole recovery window:
 
 - Known caption/broadcaster/credit families and punctuation-only output are

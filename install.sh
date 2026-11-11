@@ -10,14 +10,26 @@ set -euo pipefail
 
 CHECK_ONLY=false
 WAYLAND=false
+REPLACEMENTS_FILE=""
 [ "${XDG_SESSION_TYPE:-}" != wayland ] || WAYLAND=true
 for arg in "$@"; do
     case "$arg" in
         --check) CHECK_ONLY=true ;;
         --wayland) WAYLAND=true ;;
-        *) echo "Usage: $0 [--check] [--wayland]" >&2; exit 2 ;;
+        --replacements-file=?*) REPLACEMENTS_FILE="${arg#--replacements-file=}" ;;
+        *) echo "Usage: $0 [--check] [--wayland] [--replacements-file=PATH]" >&2; exit 2 ;;
     esac
 done
+# Optional replacement list (docs/configuration.md#replacement-list). Only
+# written into a NEW config.yaml, and only when the file exists now.
+if [ -n "$REPLACEMENTS_FILE" ]; then
+    REPLACEMENTS_FILE="${REPLACEMENTS_FILE/#\~/$HOME}"
+    if [ ! -f "$REPLACEMENTS_FILE" ] || [ ! -r "$REPLACEMENTS_FILE" ]; then
+        echo "Replacement list not found or not readable: $REPLACEMENTS_FILE" >&2
+        exit 2
+    fi
+    REPLACEMENTS_FILE="$(cd "$(dirname "$REPLACEMENTS_FILE")" && pwd)/$(basename "$REPLACEMENTS_FILE")"
+fi
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 SERVICE_NAME="spraakherkenning"
@@ -72,12 +84,17 @@ language:
 recording:
   max_time_s: 0
 YAML
+    if [ -n "$REPLACEMENTS_FILE" ]; then
+        # Single-quoted YAML scalar: only a quote needs escaping (doubled).
+        printf "recognition:\n  replacements_file: '%s'\n" "${REPLACEMENTS_FILE//\'/\'\'}"
+    fi
 }
 
 seed_config() {
     # -L as well: a symlink, even a dangling one, is the user's choice.
     if [ -e "$CONFIG_FILE" ] || [ -L "$CONFIG_FILE" ]; then
         echo "Settings file exists, left unchanged: $CONFIG_FILE"
+        replacements_hint
         return 0
     fi
     mkdir -p "$CONFIG_DIR"
@@ -89,9 +106,17 @@ seed_config() {
     if ! mv -n "$seed" "$CONFIG_FILE" || [ -e "$seed" ]; then
         rm -f "$seed"
         echo "Settings file exists, left unchanged: $CONFIG_FILE"
+        replacements_hint
         return 0
     fi
     echo "Created settings file: $CONFIG_FILE"
+}
+
+replacements_hint() {
+    [ -n "$REPLACEMENTS_FILE" ] || return 0
+    echo "Replacement list NOT added (existing file). If it has no recognition: section, append:"
+    echo "  recognition:"
+    echo "    replacements_file: $REPLACEMENTS_FILE"
 }
 
 render_service() {

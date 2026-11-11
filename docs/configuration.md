@@ -116,6 +116,7 @@ table and `config.example.yaml` in step with the code.
 | `streaming.paste_min_s` | float | `12.0` | ≥ 0 | `--paste-min-s` |  | Seconds of audio merged before one paste; 0 = per chunk. |
 | `streaming.context_chars` | int | `500` | ≥ 0 | `--context-chars` |  | Characters of earlier text given to Whisper as prompt; 0 = off. |
 | `transcription.vad_filter` | bool | `false` |  | `--transcribe-vad` |  | Gate decoding with VAD (off: the phrase filter is used). |
+| `recognition.replacements_file` | string or null | `null` |  |  |  | Path of a replacement list (wrong form -> right form) applied to every recognised chunk; null = none. |
 | `output.hallucination_filter` | bool | `true` |  | `--no-hallucination-filter` |  | Drop chunks that are only a known silence artefact. |
 | `output.space_rule_runs` | bool | `true` |  | `--no-space-rule-runs` |  | Type '***' as '* * *' so it never renders as Markdown. |
 | `output.ellipsis_style` | string | `space` | space | single | keep | `--ellipsis-style` |  | How '...' is typed: space, single or keep. |
@@ -148,9 +149,65 @@ Notes:
   wezterm, tilix, urxvt, rxvt); it never replaces it. It selects only the paste
   shortcut, never line breaks or HTML. Left Ctrl explicitly forces terminal
   paste (Ctrl+Shift+V), including for unknown terminals.
-- Sound paths and the rewrite file paths may start with `~`.
+- Sound paths, `recognition.replacements_file` and the rewrite file paths may
+  start with `~`.
+- `recognition.replacements_file`: see [Replacement list](#replacement-list).
 - `rewrite.signature` may be a multi-line YAML string; each line goes on its own
   line under the sign-off.
+
+## Replacement list
+
+Whisper tends to mishear the same names the same way, for example a product
+name as a similar-sounding word or an acronym as a neighbouring one. A
+replacement list fixes those spellings after recognition and changes nothing
+else. It is off by default (`recognition.replacements_file: null`).
+
+The list applies to every recognised chunk, right after the silence-artefact
+filter and before anything else uses the text: pasting, the rolling Whisper
+context, the corrections of the stop check and rewrite mode. For ordinary chunks the raw decode in the
+coverage record (`outcome`, field `raw`) stays as Whisper heard it, so a later
+review can still count the wrong forms. Batch mode applies the same list.
+
+File format: UTF-8 text, one rule per line, `wrong form -> right form` (or `→`
+instead of `->`), with whitespace around the arrow. Blank lines and lines that
+start with `#` are ignored.
+
+```text
+# Neutral example: two mishearings of one product name and one acronym.
+foo ?bar|fubar -> FooBar
+xyz -> XYZ
+```
+
+- The left side is a Python regular expression, matched **case-insensitively**
+  and only **as whole words**: `xyz` matches `Xyz` and `XYZ`, never the inside
+  of `xyzzy`. Use `|` for alternatives, `?` for an optional character.
+- The right side is literal text, inserted exactly as written.
+- Rules apply in file order, each on the result of the rules above it.
+- Keep only forms that can mean nothing else in your dictation. A common word
+  (`cloud`, `pc`) on the left side changes every sentence that uses it.
+
+Errors never stop dictation:
+
+| Situation | Behaviour | Journal line (`DCT-COVERAGE`, kind) |
+|---|---|---|
+| Key not set | no list | – |
+| File missing, unreadable, a directory, larger than 256 KiB or not UTF-8 | no list | `replacements_unavailable` with `reason` |
+| A line without arrow, an empty side, a bad regular expression, or a pattern that matches empty text | that line is skipped | `replacements_rule_skipped` with `line` and `reason` |
+| Loaded at start | – | `replacements_loaded` with the number of rules |
+| A rule changed a chunk | – | `replacement` with `rule` (`L` + line number) and `count` |
+
+These journal lines never contain a pattern, a replacement or dictated text.
+The list is read once at start; after editing it, restart the service when no
+dictation runs.
+
+`install.sh --replacements-file=PATH` writes the key into a **new**
+`config.yaml` (the path must exist). An existing `config.yaml` is never touched;
+add the key by hand:
+
+```yaml
+recognition:
+  replacements_file: ~/path/to/replacements.txt
+```
 
 ## The older `rewrite.env`
 

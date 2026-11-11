@@ -39,6 +39,9 @@ streaming:
 transcription:
   # vad_filter: false    # Gate decoding with VAD (off: the phrase filter is used).
 
+recognition:
+  # replacements_file: null    # Path of a replacement list (wrong form -> right form) applied to every recognised chunk; null = none.
+
 output:
   # hallucination_filter: true    # Drop chunks that are only a known silence artefact.
   # space_rule_runs: true    # Type '***' as '* * *' so it never renders as Markdown.

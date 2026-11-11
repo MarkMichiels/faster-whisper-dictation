@@ -44,6 +44,7 @@ REWRITE_ENVIRON = None    # None: rewrite.load_config reads os.environ
 CONTEXT_MAX_AGES = None   # None: context_capture's own PRIMARY/CLIPBOARD limits
 RELEASE_SELECTION = True  # rewrite.context.release_selection
 CONTEXT_BADGE = True      # rewrite.context.badge
+REPLACEMENTS = None       # recognition.replacements_file, as a replacements.ReplacementList
 
 # ---------------------------------------------------------------------------
 # Output hygiene: hallucination filter + horizontal-rule guard
@@ -833,6 +834,13 @@ class TranscriptionWorker:
                                    space_runs=self.space_rule_runs,
                                    ellipsis_style=self.ellipsis_style,
                                    audio=stats)
+        # Fixed replacement list (recognition.replacements_file): after the
+        # artefact filter, before delivery, the rolling context, the stop
+        # check's corrections and rewrite mode, which all start from this text.
+        # The raw decode (last_raw) stays as Whisper heard it.
+        replacements = getattr(self, 'replacements', None) or REPLACEMENTS
+        if replacements:
+            text = replacements.apply(text)
 
         # A dropped artefact must not enter the rolling prompt either: feeding
         # 'TV Gelderland 2021' back as context makes the next chunk repeat it.
@@ -1233,6 +1241,8 @@ class KeyboardReplayer():
             text += segment_text
 
         text = sanitize_transcript(text)
+        if REPLACEMENTS:
+            text = REPLACEMENTS.apply(text)
 
         if text:
             self.type_text(text)
@@ -1721,7 +1731,9 @@ def parse_args(argv=None, environ=None):
 def apply_settings(loaded, environ=None):
     """Settings without a CLI option go to the module and class attributes that hold them."""
     global SOUND_START, SOUND_STOP, REWRITE_ENVIRON, CONTEXT_MAX_AGES, RELEASE_SELECTION, CONTEXT_BADGE
+    global REPLACEMENTS
     import coverage_ledger
+    import replacements
     MultiTapKeyListener.TAP_WINDOW = loaded.get('keys.tap_window_s')
     MouseToggleListener.COALESCE_WINDOW = loaded.get('mouse.coalesce_s')
     coverage_ledger.STOP_STATUS = loaded.get('output.stop_status')
@@ -1735,6 +1747,9 @@ def apply_settings(loaded, environ=None):
                         loaded.get('rewrite.context.clipboard_max_age_s'))
     RELEASE_SELECTION = loaded.get('rewrite.context.release_selection')
     CONTEXT_BADGE = loaded.get('rewrite.context.badge')
+    # A missing or broken list only gives a journal warning; never a stop.
+    REPLACEMENTS = replacements.load(loaded.get('recognition.replacements_file'),
+                                     coverage_ledger.diagnostic)
 
 
 # ---------------------------------------------------------------------------
