@@ -1298,10 +1298,12 @@ class MultiTapKeyListener():
         self.alt_held = False
         self.alt_as_meta = False
         self.ctrl_held = False
+        self.right_shift_held = False  # journal only: Right-Shift never selects a language
         self.right_ctrl_down = False  # only for recognising Ctrl+A, never a rewrite modifier
         self.main_down = False
         # Last press / release time per modifier, for the journal only.
-        self.mod_times = {'shift': [None, None], 'alt': [None, None], 'ctrl': [None, None]}
+        self.mod_times = {'shift': [None, None], 'alt': [None, None], 'ctrl': [None, None],
+                          'shift_r': [None, None]}
         self.last_press_time = 0
         self.tap_count = 0
         self.lang_last_press_time = 0
@@ -1343,6 +1345,15 @@ class MultiTapKeyListener():
                 info[mod + '_released_s_ago'] = round(now - up, 3)
         if self.alt_held and self.alt_as_meta:
             info['alt_as_meta'] = True
+        # Right-Shift is ignored for the language, but a start where the user meant
+        # Shift and the service saw only Right-Shift must be recognisable.
+        if self.right_shift_held or self.mod_times['shift_r'][1] is not None:
+            down, up = self.mod_times['shift_r']
+            info['shift_r'] = self.right_shift_held
+            if self.right_shift_held and down is not None:
+                info['shift_r_held_s'] = round(now - down, 3)
+            elif up is not None:
+                info['shift_r_released_s_ago'] = round(now - up, 3)
         return info
 
     def modifiers_held(self):
@@ -1380,6 +1391,11 @@ class MultiTapKeyListener():
             if not self.shift_held:
                 self._mod_event('shift', True)
             self.shift_held = True
+            return
+        if name == 'shift_r':
+            if not self.right_shift_held:
+                self._mod_event('shift_r', True)
+            self.right_shift_held = True
             return
         # Left-Alt arrives as the generic name 'alt' (Alt_L), so it must be
         # tracked before the generic-modifier skip below; after Shift it
@@ -1444,6 +1460,10 @@ class MultiTapKeyListener():
             if self.shift_held:
                 self._mod_event('shift', False)
             self.shift_held = False
+        elif name == 'shift_r':
+            if self.right_shift_held:
+                self._mod_event('shift_r', False)
+            self.right_shift_held = False
         elif self._is_left_alt(key, name):
             if self.alt_held:
                 self._mod_event('alt', False)

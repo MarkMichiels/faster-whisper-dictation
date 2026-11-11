@@ -200,6 +200,55 @@ class KeyTests(unittest.TestCase):
         self.tap_twice(listener)
         self.assertEqual(calls[-1][:2], ('nl', False))
 
+    def test_every_press_and_release_order_selects_language(self):
+        # Left-Shift with Left-Alt and/or Left-Ctrl, every press order and both
+        # release orders. Left-Alt is decoded as X does: Meta_L while Shift is down.
+        import itertools
+        cls = listener_class()
+        calls = []
+        listener = cls(lambda *a: calls.append(a), lambda: None,
+                       key=CTRL_R, default_language='nl', shift_language='en')
+
+        def as_x(k, shift_down):
+            return META_L if k is ALT and shift_down else k
+
+        for mods in ('S', 'A', 'C', 'SA', 'SC', 'AC', 'SAC'):
+            for order in itertools.permutations(mods):
+                for fifo in (False, True):
+                    keys = [{'S': SHIFT, 'A': ALT, 'C': CTRL}[m] for m in order]
+                    listener.last_press_time = 0
+                    down = []
+                    for k in keys:
+                        listener.on_press(as_x(k, SHIFT in down))
+                        down.append(k)
+                    for _ in range(2):
+                        listener.on_press(CTRL_R)
+                        listener.on_release(CTRL_R)
+                    for k in (keys if fifo else reversed(keys)):
+                        listener.on_release(as_x(k, SHIFT in down))
+                        down.remove(k)
+                    label = ''.join(order) + (' fifo' if fifo else '')
+                    self.assertEqual(calls[-1][:2], ('en' if 'S' in mods else 'nl', True)
+                                     if mods != 'S' else ('en', False), label)
+                    self.assertFalse(listener.modifiers_held(), label)
+
+    def test_right_shift_is_journalled_but_never_selects_english(self):
+        cls = listener_class()
+        calls = []
+        listener = cls(lambda *a: calls.append(a), lambda: None,
+                       key=CTRL_R, default_language='nl', shift_language='en')
+        self.tap_twice(listener, (ALT,))
+        self.assertNotIn('shift_r', calls[-1][2])  # never seen: no extra journal field
+        self.tap_twice(listener, (ALT, key('shift_r', 65506)))
+        self.assertEqual(calls[-1][:2], ('nl', True))
+        self.assertTrue(calls[-1][2]['shift_r'])
+        self.assertIn('shift_r_held_s', calls[-1][2])
+        self.assertFalse(calls[-1][2]['shift'])
+        self.tap_twice(listener)
+        self.assertFalse(calls[-1][2]['shift_r'])
+        self.assertIn('shift_r_released_s_ago', calls[-1][2])
+        self.assertFalse(listener.modifiers_held())
+
     def test_alt_tracked_despite_generic_skip(self):
         cls = listener_class()
         listener = cls(lambda *a: None, lambda: None, key=CTRL_R, default_language='nl')
