@@ -1033,6 +1033,43 @@ class EnglishRewriteTests(AppStart, unittest.TestCase):
         self.assertEqual(app.transcription_worker.language, 'en')
         self.assertEqual(bodies, [])
 
+    def test_hotkey_rule_from_key_to_session(self):
+        # The intended rule, end to end from key events to the started session:
+        # Left-Shift = English in every case; Left-Ctrl = one plain line
+        # (terminal); Left-Alt = rich; Ctrl wins over Alt. Every press order.
+        import itertools
+        listener = listener_class()(lambda *a: activations.append(a), lambda: None,
+                                    key=CTRL_R, default_language='nl', shift_language='en')
+        for mods in ('', 'S', 'A', 'C', 'SA', 'SC', 'AC', 'SAC'):
+            for order in itertools.permutations(mods):
+                label = ''.join(order) or '-'
+                activations = []
+                listener.last_press_time = 0
+                down = []
+                for m in order:
+                    k = {'S': SHIFT, 'A': ALT, 'C': CTRL}[m]
+                    listener.on_press(META_L if k is ALT and SHIFT in down else k)
+                    down.append(k)
+                for _ in range(2):
+                    listener.on_press(CTRL_R)
+                    listener.on_release(CTRL_R)
+                for k in reversed(down[:]):
+                    down.remove(k)
+                    listener.on_release(META_L if k is ALT and SHIFT in down else k)
+                app, session, records, bodies = self.run_start(*activations[-1])
+                start = next(r for r in records if r['kind'] == 'session_start')
+                mode = 'terminal' if 'C' in mods else 'rich' if 'A' in mods else 'plain'
+                self.assertEqual(start['mode'], mode, label)
+                if mode == 'plain':
+                    self.assertEqual(start['language'], 'en' if 'S' in mods else 'nl', label)
+                    self.assertEqual(bodies, [], label)
+                else:
+                    want = 'en' if 'S' in mods else 'nl'
+                    self.assertEqual((start['language'], start['output_language']), ('nl', want), label)
+                    system = bodies[0]['messages'][0]['content']  # the prompt that was sent
+                    self.assertEqual(system.startswith('Task: rewrite'), want == 'en', label)
+                    self.assertEqual('Belgisch-Nederlands' in system, want == 'nl', label)
+
     def test_primary_age_limit(self):
         self.assertLessEqual(context_capture.PRIMARY_MAX_AGE_S, 20)
         self.assertEqual(context_capture.judge('primary', dict(owner=True, targets=[], age_s=25),
