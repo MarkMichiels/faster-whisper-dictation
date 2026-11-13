@@ -30,7 +30,7 @@ const changeOwner = (type, source) => [...handlers.values()].forEach(fn => fn(se
 const timeouts = new Map();
 let nextTimeout = 1;
 const GLib = {
-    get_monotonic_time: () => now, PRIORITY_DEFAULT: 0, SOURCE_REMOVE: false,
+    get_monotonic_time: () => now, PRIORITY_DEFAULT: 0, SOURCE_REMOVE: false, SOURCE_CONTINUE: true,
     timeout_add(_priority, ms, fn) { const id = nextTimeout++; timeouts.set(id, [ms, fn]); return id; },
     source_remove(id) { timeouts.delete(id); },
 };
@@ -39,9 +39,14 @@ class Label {
     constructor(props) { Object.assign(this, props); }
     get_preferred_width() { return [0, 300]; }
     set_position(x, y) { this.x = x; this.y = y; }
+    set_text(text) { this.text = text; }
+    set_style(style) { this.style = style; }
     destroy() { this.destroyed = true; stage.splice(stage.indexOf(this), 1); }
 }
-const Main = {layoutManager: {uiGroup: {add_child(actor) { stage.push(actor); }}}};
+// Work area = monitor minus a 32 px top bar.
+const Main = {layoutManager: {uiGroup: {add_child(actor) { stage.push(actor); }},
+    getWorkAreaForMonitor: i => (i === 1 ? {x: 1920, y: 32, width: 2560, height: 1408}
+        : {x: 0, y: 32, width: 1920, height: 1048})}};
 const editor = {get_id: () => 42, get_wm_class: () => 'editor', get_pid: () => 500,
     get_monitor: () => 1, activate() { active = true; }};
 const popout = {get_id: () => 43, get_wm_class: () => 'editor', get_pid: () => 500, get_monitor: () => 1};
@@ -126,6 +131,80 @@ assert.equal(stage[0].text, 'Context opgepakt: 1.234.567 tekens');
 assert.deepEqual([stage[0].x, stage[0].y], [1920 - 300 - 16, 16]);
 display.focus_window = editor;
 
+
+// Status box: codes and one count only, fixed Dutch words, under the top bar.
+for (const [id, [, fn]] of [...timeouts.entries()]) { fn(); timeouts.delete(id); }   // badge hides
+assert.equal(stage.length, 0);
+now = 10_000_000;
+helper.SetStatus('recording', 'dictate', '', 0);
+assert.equal(stage.length, 1);
+const box = stage[0];
+assert.equal(box.text, 'Dictatie — ● opnemen 0:00');
+assert.equal(box.reactive, false);
+assert.equal(box.can_focus, false);
+assert.equal(box.track_hover, false);
+assert.match(box.style, /#a51d2d/);
+assert.deepEqual([box.x, box.y], [1920 + 2560 - 300 - 8, 32 + 8]);
+const timers = () => [...timeouts.values()].map(([ms]) => ms).sort((a, b) => a - b);
+assert.deepEqual(timers(), [1000, 1_900_000]);   // clock tick + stale guard
+now += 7_000_000;
+const tick = [...timeouts.values()].find(([ms]) => ms === 1000)[1];
+assert.equal(tick(), true);   // SOURCE_CONTINUE
+assert.equal(box.text, 'Dictatie — ● opnemen 0:07');
+helper.SetStatus('recording', 'dictate', '', 0);   // repeat keeps the clock
+assert.equal(box.text, 'Dictatie — ● opnemen 0:07');
+assert.equal(stage.length, 1);
+helper.SetStatus('recording', 'dictate', 'en', 0);
+assert.equal(box.text, 'Dictatie · Engels — ● opnemen 0:07');
+helper.SetStatus('recording', 'rewrite', '', 4312);   // mode change restarts the clock
+assert.equal(box.text, 'Herschrijven met opmaak · context: 4.312 tekens — ● opnemen 0:00');
+helper.SetStatus('recording', 'rewrite_line', 'en', 0);
+assert.equal(box.text, 'Herschrijven als één regel · Engels — ● opnemen 0:00');
+helper.SetStatus('recording', 'dictate_fallback', 'xx', 0);
+assert.equal(box.text, 'Dictatie (herschrijven niet beschikbaar) · XX — ● opnemen 0:00');
+helper.SetStatus('recording_silent', 'dictate', '', 0);
+assert.match(box.text, /microfoon geeft alleen stilte/);
+assert.match(box.style, /#c64600/);
+helper.SetStatus('finishing', 'rewrite', '', 4312);
+assert.equal(box.text, 'Herschrijven met opmaak · context: 4.312 tekens — afronden… 0:00');
+assert.match(box.style, /#1c5fb4/);
+helper.SetStatus('rewriting', 'rewrite', '', 4312);
+assert.equal(box.text, 'Herschrijven met opmaak · context: 4.312 tekens — herschrijven… 0:00');
+assert.deepEqual(timers(), [1000, 900_000]);
+helper.SetStatus('pasted', 'rewrite', '', 4312);
+assert.equal(box.text, 'Herschrijven met opmaak · context: 4.312 tekens — geplakt ✓');
+assert.match(box.style, /#1f6f3f/);
+assert.deepEqual(timers(), [1500]);   // no clock, short hide
+const [[hideId, [, hide]]] = [...timeouts.entries()];
+assert.equal(hide(), false);   // SOURCE_REMOVE: GLib drops the source
+timeouts.delete(hideId);
+assert.equal(stage.length, 0);
+assert.equal(timeouts.size, 0);
+for (const [phase, ms, words] of [['raw_pasted', 6000, 'herschrijven mislukt, ruwe tekst geplakt'],
+    ['paste_refused', 6000, 'plakken geweigerd'], ['mic_silent', 6000, 'microfoon gaf alleen stilte'],
+    ['nothing', 3000, 'niets herkend']]) {
+    helper.SetStatus(phase, 'dictate', '', 0);
+    assert.ok(stage[0].text.includes(words), phase);
+    assert.deepEqual(timers(), [ms]);
+}
+helper.ClearStatus();
+assert.equal(stage.length, 0);
+assert.equal(timeouts.size, 0);
+helper.ClearStatus();   // idempotent
+// Strict allowlist: no free text can ever reach the label.
+for (const args of [['Hallo wereld', 'dictate', '', 0], ['recording', 'Geachte heer', '', 0],
+    ['recording', 'dictate', 'Beste Jan', 0], ['recording', 'dictate', 'EN', 0],
+    ['toString', 'dictate', '', 0], ['recording', '__proto__', '', 0], ['recording', 'dictate', 'english', 0]])
+    assert.throws(() => helper.SetStatus(...args), /not allowed/);
+assert.equal(stage.length, 0);
+// Focus on the other monitor: box on that monitor; still there at disable -> removed.
+display.focus_window = other;
+helper.SetStatus('recording', 'dictate', '', 0);
+assert.deepEqual([stage[0].x, stage[0].y], [1920 - 300 - 8, 32 + 8]);
+display.focus_window = editor;
+helper.ShowBadge(12);   // the old badge still exists beside it
+assert.equal(stage.length, 2);
+
 for (const [name, expected] of [
     ['paste', [[1, 1], [3, 1], [3, 0], [1, 0]]],
     ['paste_terminal', [[1, 1], [2, 1], [3, 1], [3, 0], [2, 0], [1, 0]]],
@@ -151,4 +230,4 @@ assert.equal(handlers.size, 0);
 assert.equal(stage.length, 0);
 assert.equal(timeouts.size, 0);
 assert.ok(!/get_text|get_content|transfer_async|read_bytes/.test(source), 'no selection content API');
-console.log('PASS: JS focus/activation, selection change metadata, badge, strict allowlist, reverse release/failure cleanup, lifecycle');
+console.log('PASS: JS focus/activation, selection change metadata, badge, status box, strict allowlist, reverse release/failure cleanup, lifecycle');

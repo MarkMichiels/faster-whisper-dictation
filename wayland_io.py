@@ -15,6 +15,10 @@ BUS = 'org.gnome.Shell.Extensions.DictationHelper'
 PATH = '/org/gnome/Shell/Extensions/DictationHelper'
 SHORTCUTS = frozenset(('paste', 'paste_terminal', 'ctrl_home'))
 SELECTIONS = frozenset(('primary', 'clipboard'))
+# Status box codes (the words live in the extension). Never text.
+STATUS_PHASES = frozenset(('recording', 'recording_silent', 'finishing', 'rewriting', 'pasted',
+                           'nothing', 'mic_silent', 'paste_refused', 'raw_pasted'))
+STATUS_MODES = frozenset(('dictate', 'rewrite', 'rewrite_line', 'dictate_fallback'))
 
 
 def parse_gvariant_text(text: str) -> Any:
@@ -99,6 +103,23 @@ class ShellClient:
     def badge(self, chars: int) -> None:
         """Show the context badge; only the number of characters is sent."""
         self._call('ShowBadge', str(max(0, int(chars))))
+
+    def status(self, phase: str, mode: str, language: str = '', chars: int = 0) -> None:
+        """Show the status box. Only allowlisted codes and one count are sent.
+
+        Codes are quoted GVariant strings, so gdbus never has to guess the type
+        (an empty language would otherwise not parse).
+        """
+        if phase not in STATUS_PHASES or mode not in STATUS_MODES:
+            raise ValueError('status not allowed')
+        if not (language == '' or (2 <= len(language) <= 3 and language.isascii()
+                                   and language.isalpha() and language.islower())):
+            raise ValueError('status not allowed')
+        self._call('SetStatus', "'%s'" % phase, "'%s'" % mode, "'%s'" % language,
+                   str(max(0, int(chars))))
+
+    def clear_status(self) -> None:
+        self._call('ClearStatus')
 
 
 class Key(enum.Enum):
@@ -407,6 +428,12 @@ def bind(replayer: type, tap_listener: type, mouse_listener: type) -> tuple[type
 
         def show_badge(self, chars: int) -> None:
             self.shell.badge(chars)
+
+        def show_status(self, phase: str, mode: str, language: str = '', chars: int = 0) -> None:
+            self.shell.status(phase, mode, language, chars)
+
+        def clear_status(self) -> None:
+            self.shell.clear_status()
 
     class WaylandTap(tap_listener):
         def run(self) -> None:

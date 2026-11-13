@@ -44,6 +44,7 @@ REWRITE_ENVIRON = None    # None: rewrite.load_config reads os.environ
 CONTEXT_MAX_AGES = None   # None: context_capture's own PRIMARY/CLIPBOARD limits
 RELEASE_SELECTION = True  # rewrite.context.release_selection
 CONTEXT_BADGE = True      # rewrite.context.badge
+STATUS_BOX = True         # output.status_box (Wayland only; replaces the badge)
 REPLACEMENTS = None       # recognition.replacements_file, as a replacements.ReplacementList
 
 # ---------------------------------------------------------------------------
@@ -1768,7 +1769,7 @@ def parse_args(argv=None, environ=None):
 def apply_settings(loaded, environ=None):
     """Settings without a CLI option go to the module and class attributes that hold them."""
     global SOUND_START, SOUND_STOP, REWRITE_ENVIRON, CONTEXT_MAX_AGES, RELEASE_SELECTION, CONTEXT_BADGE
-    global REPLACEMENTS
+    global REPLACEMENTS, STATUS_BOX
     import coverage_ledger
     import replacements
     MultiTapKeyListener.TAP_WINDOW = loaded.get('keys.tap_window_s')
@@ -1784,6 +1785,7 @@ def apply_settings(loaded, environ=None):
                         loaded.get('rewrite.context.clipboard_max_age_s'))
     RELEASE_SELECTION = loaded.get('rewrite.context.release_selection')
     CONTEXT_BADGE = loaded.get('rewrite.context.badge')
+    STATUS_BOX = loaded.get('output.status_box')
     # A missing or broken list only gives a journal warning; never a stop.
     REPLACEMENTS = replacements.load(loaded.get('recognition.replacements_file'),
                                      coverage_ledger.diagnostic)
@@ -1957,6 +1959,14 @@ class App():
             self.paste_wid = None
             self.held = []
             self.done = threading.Event()
+            # Status box: (mode code, language code, context characters), and
+            # counts only. Never any text of the session.
+            self.status_info = ('rewrite_line' if rewrite and terminal_mode else 'rewrite' if rewrite else 'dictate',
+                                '', 0)
+            self.status_final = False
+            self.mic_silent = False
+            self.pasted = 0
+            self.paste_failed = 0
 
     def __init__(self, args):
         self.args = args
@@ -1993,6 +2003,43 @@ class App():
         # the hotkey falls back to ordinary dictation with a journal line.
         self.rewrite_config, self.rewrite_reason = rewrite.load_config(REWRITE_ENVIRON)
         self._announce_rewrite()
+        self.status = self._make_status_box()
+
+    def _make_status_box(self):
+        """Wayland: the status box through the helper; None elsewhere or when off."""
+        replayer = self.replayer
+        if not (WAYLAND and STATUS_BOX and hasattr(replayer, 'show_status')):
+            return None
+        import status_box
+        box = status_box.StatusBox(replayer.show_status, replayer.clear_status,
+                                   badge=replayer.show_badge if CONTEXT_BADGE else None,
+                                   log=diagnostic)
+        box.clear()  # a box left behind by a previous instance that died
+        return box
+
+    def _status(self, session, phase, final=False):
+        """Show phase for session on the status box. Only the newest session
+        shows; never raises. The box gets codes and counts only."""
+        box = getattr(self, 'status', None)
+        if box is None or session is None or session is not getattr(self, 'session', None):
+            return
+        try:
+            if final:
+                session.status_final = True
+            mode, language, chars = session.status_info
+            box.show(phase, mode, language, chars)
+        except Exception as exc:
+            diagnostic('status_box', sent=False, error=type(exc).__name__)
+
+    def _status_end(self, session):
+        """Final phase of a plain dictation session, from counts only."""
+        if session.paste_failed:
+            phase = 'paste_refused'
+        elif session.pasted:
+            phase = 'pasted'
+        else:
+            phase = 'mic_silent' if session.mic_silent else 'nothing'
+        self._status(session, phase, final=True)
 
     def _announce_rewrite(self):
         if not self.rewrite_config:
@@ -2013,9 +2060,13 @@ class App():
     def beep(self, k, wait=True):
         playsound(self.SOUND_EFFECTS[k], wait=wait)
 
-    def _mic_silent_alert(self):
+    def _mic_silent_alert(self, session=None):
         """Three equal tones: the microphone passes only exact zeros. Called
         from the recording thread, so the stream opens on a thread of its own."""
+        if session is not None:
+            session.mic_silent = True
+            if getattr(session, 'recorder', None) is not None and getattr(self, 'active', False):
+                self._status(session, 'recording_silent')
         threading.Thread(target=self.beep, args=('mic_silent', False), daemon=True).start()
 
     def _load_cpu_recovery_worker(self):
@@ -2078,7 +2129,6 @@ class App():
         self.typing_queue = queue.Queue()
 
         self.ledger = CoverageLedger()
-        self.ledger.on_digital_silence = self._mic_silent_alert
         # Publish the new session before anything slow (recorder start, xdotool):
         # a previous session that ends meanwhile must see it is no longer the
         # current one, or it would clear `active` while this one records.
@@ -2088,7 +2138,14 @@ class App():
         session = self.Session(self.transcription_queue, self.typing_queue, self.ledger,
                                None, previous, spoken, None, rewrite=rewrite_mode,
                                output_language=language, terminal_mode=bool(keys and keys.get('ctrl')))
+        self.ledger.on_digital_silence = lambda: self._mic_silent_alert(session)
         self.session = session
+        import status_box  # local: tests load App without module imports
+        default = getattr(getattr(self, 'args', None), 'language', None)
+        shown = language if rewrite_mode else spoken
+        session.status_info = (
+            status_box.mode_of(rewrite_mode, session.terminal_mode, start_sound == 'rewrite_unavailable'),
+            '' if shown is _UNSET or shown == default else status_box.language_code(shown), 0)
         start_meta = dict(language='unchanged' if spoken is _UNSET else spoken or 'auto')
         if rewrite_mode:
             start_meta['output_language'] = None if language is _UNSET else language
@@ -2123,13 +2180,17 @@ class App():
             session.context = context.text
             diagnostic('rewrite_context', **context.journal())
             start_sound = 'rewrite_start_context' if context.text else 'rewrite_start'
-            if context.text and CONTEXT_BADGE:
+            if context.text:
+                session.status_info = session.status_info[:2] + (context.chars,)
+            # The status box shows the context count; the badge only without it.
+            if context.text and CONTEXT_BADGE and getattr(self, 'status', None) is None:
                 if globals().get('WAYLAND', False):
                     self._shell_badge(context.chars)
                 else:
                     context_badge.launch(context.chars, log=diagnostic)
             self._plan_selection_release(session, context, started_at, read_at, read_done, previous)
 
+        self._status(session, 'recording')
         self.beep(start_sound, wait=False)
         print('Recording (streaming mode) ...')
 
@@ -2220,6 +2281,7 @@ class App():
             self.timer.cancel()
             self.timer = None
         self._fix_paste_window(getattr(self, 'session', None))
+        self._status(getattr(self, 'session', None), 'finishing')
 
         # Stop recorder — this flushes remaining audio and sends sentinel
         self.recorder.stop()
@@ -2246,6 +2308,7 @@ class App():
             self.timer.cancel()
             self.timer = None
         self._fix_paste_window(getattr(self, 'session', None))
+        self._status(getattr(self, 'session', None), 'finishing')
 
         self.recorder.stop()
         self.active = False
@@ -2411,6 +2474,10 @@ class App():
             else:
                 self._typing_session(session)
         finally:
+            # Never leave a stale "afronden" behind after an unexpected error.
+            if not getattr(session, 'status_final', True) and getattr(self, 'status', None) is not None \
+                    and session is getattr(self, 'session', None):
+                self.status.clear()
             # Context is reply material for this one session only.
             session.context = None
             # Release the next session even if this one failed.
@@ -2458,7 +2525,10 @@ class App():
     def _deliver_rewrite(self, session, raw, status):
         if not raw:
             diagnostic('rewrite_skipped', reason='no_text')
+            self._status(session, 'mic_silent' if getattr(session, 'mic_silent', False) else 'nothing',
+                         final=True)
             return
+        self._status(session, 'rewriting')
         # Raw text first into CopyQ history, so it survives any later failure.
         history = self.replayer.add_to_history(raw)
         diagnostic('rewrite_raw_saved', copyq_add=history)
@@ -2489,6 +2559,8 @@ class App():
                    paste_window='stop' if session.paste_wid else 'start',
                    **{k: v for k, v in (delivery or {}).items() if k != 'text'})
         self.beep('rewrite_done' if result.ok and (delivery or {}).get('ok') else 'rewrite_failed', wait=False)
+        self._status(session, 'pasted' if result.ok and (delivery or {}).get('ok') else
+                     'raw_pasted' if (delivery or {}).get('ok') else 'paste_refused', final=True)
 
     def _typing_session(self, session):
         first_chunk = True
@@ -2506,8 +2578,11 @@ class App():
                             prefix = '' if first_chunk else ' '
                             first_chunk = False
                             if getattr(session, 'terminal_mode', False):
-                                return self.replayer.type_text(prefix + correction, terminal_mode=True)
-                            return self.replayer.type_text(prefix + correction)
+                                result = self.replayer.type_text(prefix + correction, terminal_mode=True)
+                            else:
+                                result = self.replayer.type_text(prefix + correction)
+                            self._count_paste(session, result)
+                            return result
                         self._stop_check(ledger, deliver)
                     except Exception as exc:
                         ledger.incident('stop_check_failed', error=str(exc))
@@ -2519,6 +2594,7 @@ class App():
                 # still holds `active`; never clear a newer session's flag.
                 if getattr(self, 'session', None) in (None, session):
                     self.active = False
+                self._status_end(session)
                 print('Session ended.')
                 break
 
@@ -2540,8 +2616,19 @@ class App():
                           if getattr(session, 'terminal_mode', False) else self.replayer.type_text(text))
             except Exception as exc:
                 result = dict(ok=False, path='exception', error=str(exc))
+            self._count_paste(session, result)
             if entry is not None:
                 ledger.delivered(entry, result)
+
+    @staticmethod
+    def _count_paste(session, result):
+        """Counts for the status box only: pasted or refused, never the text."""
+        if result is None:
+            return
+        if result.get('ok'):
+            session.pasted = getattr(session, 'pasted', 0) + 1
+        else:
+            session.paste_failed = getattr(session, 'paste_failed', 0) + 1
 
     def run(self):
         def normalize_key_names(keyseqs, parse=False):
@@ -2619,7 +2706,7 @@ if WAYLAND:
 def warn_if_wayland():
     """Report the experimental Wayland backend."""
     if WAYLAND:
-        print('Wayland: GNOME Dictation Helper + evdev; selection age, release and badge via the helper.')
+        print('Wayland: GNOME Dictation Helper + evdev; selection age, release, badge and status box via the helper.')
 
 
 if __name__ == "__main__":

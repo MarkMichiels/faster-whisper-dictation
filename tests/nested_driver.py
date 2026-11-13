@@ -30,7 +30,7 @@ if (not os.environ.get('PROBE_NESTED_X') or os.environ.get('DISPLAY') != os.envi
     sys.exit('refusing: driver runs only inside the private nested session')
 
 # evdev codes (Linux input-event-codes.h); be AZERTY: physical Q (16) gives 'a'.
-L_CTRL, R_CTRL, L_ALT, Q_KEY, BTN_LEFT = 29, 97, 56, 16, 272
+L_CTRL, R_CTRL, L_ALT, L_SHIFT, Q_KEY, BTN_LEFT = 29, 97, 56, 42, 16, 272
 JOURNAL: list[tuple[str, dict]] = []
 
 
@@ -292,4 +292,193 @@ def run_cases(explore: bool) -> int:
     case('F_alt_held_3s', f_alt_held)
 
     (OUT / 'results_nested.json').write_text(json.dumps(results, ensure_ascii=False, indent=1))
+    return 0
+
+
+# ---------------------------------------------------------------------------
+# Status box (--status): every phase on the nested shell, with screenshots.
+# ---------------------------------------------------------------------------
+
+def run_status_cases() -> int:
+    """The real App phases drive the real status box of the nested helper.
+
+    The typing loop is the real one (plain paste or rewrite delivery); only the
+    recognised text is put on the typing queue by hand and the LLM call is a
+    local fake that waits 3 s. No network, no model, no microphone.
+    """
+    h = Harness()
+    d, app = h.d, h.app
+    d.STATUS_BOX = True
+    d.CONTEXT_BADGE = True
+    app.status = app._make_status_box()
+    del app._typing_loop          # the real typing loop of App
+    app.transcription_worker = types.SimpleNamespace(language='nl')  # no model
+
+    class Session(d.App.Session):
+        # No audio, so no coverage ledger: the typing loop then takes the text
+        # put on the queue as is (a ledger would see no ranges and drop it).
+        def __init__(self, *args, **kw):
+            super().__init__(*args, **kw)
+            self.ledger = None
+    app.Session = Session
+    windows = json.loads(os.environ['PROBE_WINDOWS'])
+    editors = json.loads(os.environ['PROBE_EDITORS'])
+    A = windows['editor_A']['id']
+    rewrite_ok = [True]
+
+    def fake_rewrite(raw, language, context, *a, **kw):
+        JOURNAL.append(('fake_rewrite', dict(context_chars=len(context or ''), ok=rewrite_ok[0])))
+        time.sleep(3.0)
+        if not rewrite_ok[0]:
+            return d.rewrite.RewriteResult(raw, False, 'fake_failure')
+        return d.rewrite.RewriteResult('Herschreven synthetische proefzin. ', True)
+    d.rewrite.rewrite = fake_rewrite
+    results = []
+
+    def focus(wid):
+        h.shell.activate(wid)
+        deadline = time.monotonic() + 3
+        while time.monotonic() < deadline and h.shell.focus()[0] != wid:
+            time.sleep(0.05)
+        time.sleep(0.4)
+
+    def start(modifier=None):
+        mark = len(JOURNAL)
+        if modifier:
+            h.ev(modifier, 1)
+            xdo('keydown', {L_ALT: 'Alt_L', L_CTRL: 'Control_L', L_SHIFT: 'Shift_L'}[modifier])
+        for _ in range(2):
+            h.ev(R_CTRL, 1)
+            h.ev(R_CTRL, 0)
+        session = app.session
+        # What _await_previous does in the (here absent) transcription loop.
+        app.replayer.target_wid = session.target_wid
+        return mark, session
+
+    def release(modifier):
+        h.ev(modifier, 0)
+        xdo('keyup', {L_ALT: 'Alt_L', L_CTRL: 'Control_L', L_SHIFT: 'Shift_L'}[modifier])
+
+    def end(mark, session, label, shots):
+        session.done.wait(15)
+        time.sleep(0.4)
+        shot('%s_%s.png' % (label, shots[0]))
+        time.sleep(shots[1])
+        shot('%s_weg.png' % label)
+        lines = JOURNAL[mark:]
+        start_line = next((x for k, x in lines if k == 'session_start'), {})
+        return dict(mode=start_line.get('mode'), keys=start_line.get('keys'),
+                    status=[x for k, x in lines if k == 'status_box'],
+                    badge=[x for k, x in lines if k == 'context_badge'],
+                    pastes=[{k: x.get(k) for k in ('ok', 'paste', 'focus_ok')}
+                            for k, x in lines if k == 'paste_delivery'],
+                    rewrite=[x for k, x in lines if k in ('fake_rewrite', 'rewrite_delivery')])
+
+    def case(name, fn):
+        print('case', name, flush=True)
+        try:
+            res = fn()
+        except Exception as exc:
+            import traceback
+            traceback.print_exc()
+            res = dict(error='%s: %s' % (type(exc).__name__, exc))
+        res['case'] = name
+        results.append(res)
+        print(json.dumps(res, ensure_ascii=False), flush=True)
+        time.sleep(1.0)
+
+    def s1_plain():
+        focus(A)
+        reset(editors['A'])
+        mark, session = start()
+        time.sleep(2.3)
+        shot('S1_opnemen.png')
+        session.typing_queue.put('Synthetische proefzin voor het statusvak.')
+        time.sleep(1.0)
+        app.stop()
+        time.sleep(0.6)
+        shot('S1_afronden.png')
+        session.typing_queue.put(None)
+        res = end(mark, session, 'S1', ('geplakt', 2.0))
+        res['editor_after'] = editor_state(editors['A'])
+        return res
+
+    def s2_rewrite_context():
+        focus(A)
+        reset(editors['A'])
+        h.ctrl_a()
+        time.sleep(1.0)
+        mark, session = start(L_ALT)
+        time.sleep(1.2)
+        shot('S2_opnemen_context.png')
+        release(L_ALT)
+        time.sleep(0.8)
+        session.typing_queue.put('synthetische ruwe tekst')
+        app.stop()
+        time.sleep(0.6)
+        shot('S2_afronden.png')
+        session.typing_queue.put(None)
+        time.sleep(1.5)
+        shot('S2_herschrijven.png')
+        res = end(mark, session, 'S2', ('geplakt', 2.0))
+        res['editor_after'] = editor_state(editors['A'])
+        return res
+
+    def s3_rewrite_failed():
+        focus(A)
+        reset(editors['A'])
+        rewrite_ok[0] = False
+        mark, session = start(L_ALT)
+        time.sleep(0.6)
+        release(L_ALT)
+        session.typing_queue.put('synthetische ruwe tekst bij een mislukte herschrijving')
+        app.stop()
+        session.typing_queue.put(None)
+        res = end(mark, session, 'S3', ('fout_ruwe_tekst', 6.5))
+        rewrite_ok[0] = True
+        return res
+
+    def s4_refused_and_silent():
+        focus(A)
+        reset(editors['A'])
+        mark, session = start(L_SHIFT)
+        release(L_SHIFT)
+        time.sleep(1.0)
+        shot('S4_opnemen_engels.png')
+        app._mic_silent_alert(session)
+        time.sleep(0.6)
+        shot('S4_microfoon_stil.png')
+        session.target_wid = '999999'   # target gone: the paste must be refused
+        h.app.replayer.target_wid = '999999'
+        session.typing_queue.put('Synthetic sentence that must not land anywhere.')
+        app.stop()
+        session.typing_queue.put(None)
+        res = end(mark, session, 'S4', ('fout_plakken_geweigerd', 6.5))
+        res['editor_after'] = editor_state(editors['A'])
+        return res
+
+    def s5_click_through():
+        # The box lies over the close button of a maximized window (title bar,
+        # top right). A click there must reach the window: editor A closes.
+        focus(A)
+        mark = len(JOURNAL)
+        app.status.show('recording', 'dictate', '', 0)
+        time.sleep(0.8)
+        shot('S5_klik_door_vak_voor.png')
+        xdo('mousemove', '1582', '50')
+        time.sleep(0.2)
+        xdo('click', '1')
+        time.sleep(1.5)
+        shot('S5_klik_door_vak_na.png')
+        gone = not h.shell.activate(A)
+        app.status.clear()
+        return dict(editor_A_closed_by_click=gone, focus_after=h.shell.focus()[1],
+                    status=[x for k, x in JOURNAL[mark:] if k == 'status_box'])
+
+    case('S1_plain_dictation', s1_plain)
+    case('S2_rewrite_with_context', s2_rewrite_context)
+    case('S3_rewrite_failed_raw_pasted', s3_rewrite_failed)
+    case('S4_english_silent_refused', s4_refused_and_silent)
+    case('S5_click_passes_through_the_box', s5_click_through)   # last: closes editor A
+    (OUT / 'results_status.json').write_text(json.dumps(results, ensure_ascii=False, indent=1))
     return 0

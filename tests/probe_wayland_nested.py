@@ -1,6 +1,6 @@
 """Nested GNOME Shell proof of the Wayland reply-context path. Run by hand.
 
-    python tests/probe_wayland_nested.py --out DIR [--explore]
+    python tests/probe_wayland_nested.py --out DIR [--explore | --status]
 
 Everything runs on a private display stack that this script starts and stops:
 an Xvfb display (a free number from 140 up), a private D-Bus session bus, a
@@ -10,7 +10,8 @@ bus (the shell starts an X11 services target before Xwayland is usable), and
 `gnome-shell --nested --wayland` with a private HOME that has only the
 Dictation Helper extension enabled. The shell runs under strace (skip with
 PROBE_NO_STRACE=1); the result lists every /dev path it opened (no /dev/input
-expected). --explore only checks the X probe and one paste.
+expected). --explore only checks the X probe and one paste. --status runs
+the status box phases instead of the context cases (screenshots per phase).
 
 The dictation side is the real fork code (App.start, context_capture,
 selection_release, the Wayland replayer and ShellClient) with a fake recorder
@@ -107,6 +108,7 @@ def outer(out: Path, explore: bool) -> int:
                    LIBGL_ALWAYS_SOFTWARE='1', DISPLAY=':%d' % number, PROBE_XVFB=':%d' % number,
                    DBUS_SYSTEM_BUS_ADDRESS='unix:path=%s/sysbus' % tmp, PROBE_TMP=str(tmp),
                    PROBE_OUT=str(out), PROBE_PYTHON=sys.executable,
+                   PROBE_STATUS=os.environ.get('PROBE_STATUS', '0'),
                    MUTTER_DEBUG_DUMMY_MODE_SPECS='1600x1000')
         args = [sys.executable, __file__, '--inside'] + (['--explore'] if explore else [])
         result = subprocess.run(['dbus-run-session', '--'] + args, env=env, timeout=600)
@@ -268,6 +270,9 @@ def devices_opened(path: Path) -> dict[str, int]:
 # ---------------------------------------------------------------------------
 
 def driver(explore: bool) -> int:
+    if os.environ.get('PROBE_STATUS') == '1':
+        from nested_driver import run_status_cases
+        return run_status_cases()
     from nested_driver import run_cases
     return run_cases(explore)
 
@@ -279,7 +284,9 @@ if __name__ == '__main__':
     if '--driver' in sys.argv:
         sys.exit(driver('--explore' in sys.argv))
     if '--out' not in sys.argv:
-        sys.exit('usage: probe_wayland_nested.py --out DIR [--explore]')
+        sys.exit('usage: probe_wayland_nested.py --out DIR [--explore | --status]')
     if os.environ.get('DISPLAY') or os.environ.get('WAYLAND_DISPLAY'):
         print('note: the desktop DISPLAY/WAYLAND_DISPLAY are not passed on')
+    if '--status' in sys.argv:
+        os.environ['PROBE_STATUS'] = '1'   # passed on to the driver through the environment
     sys.exit(outer(Path(sys.argv[sys.argv.index('--out') + 1]).resolve(), '--explore' in sys.argv))

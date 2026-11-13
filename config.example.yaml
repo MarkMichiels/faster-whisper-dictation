@@ -47,6 +47,7 @@ output:
   # space_rule_runs: true    # Type '***' as '* * *' so it never renders as Markdown.
   # ellipsis_style: space    # How '...' is typed: space, single or keep.
   # stop_status: true    # Paste a [Controle: ...] line after a session with a correction.
+  # status_box: true    # Wayland: a status box top right while dictation runs (mode, phase, counts; never text). Replaces the context badge; false = badge only (rewrite.context.badge).
   # extra_terminal_classes: []    # Extra window classes that paste with Ctrl+Shift+V (added to the built-in list).
 
 sounds:

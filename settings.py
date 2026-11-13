@@ -115,6 +115,8 @@ SCHEMA: tuple[Setting, ...] = (
     _s('output.ellipsis_style', 'str', 'space', "How '...' is typed: space, single or keep.",
        dest='ellipsis_style', flag='--ellipsis-style', choices=('space', 'single', 'keep')),
     _s('output.stop_status', 'bool', True, 'Paste a [Controle: ...] line after a session with a correction.'),
+    _s('output.status_box', 'bool', True, 'Wayland: a status box top right while dictation runs (mode, phase, '
+       'counts; never text). Replaces the context badge; false = badge only (rewrite.context.badge).'),
     _s('output.extra_terminal_classes', 'list', [], 'Extra window classes that paste with Ctrl+Shift+V '
        '(added to the built-in list).'),
     _s('sounds.start', 'str', 'assets/granted-04.wav', 'Start sound (WAV); relative to the working directory.'),

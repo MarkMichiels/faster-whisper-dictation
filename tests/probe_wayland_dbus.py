@@ -25,8 +25,10 @@ const Clutter = {
 class Extension {}
 const Meta = {SelectionType: {SELECTION_PRIMARY: 0, SELECTION_CLIPBOARD: 1}};
 const St = {Label: class { constructor(p) { Object.assign(this, p); }
-    get_preferred_width() { return [0, 100]; } set_position() {} destroy() {} }};
-const Main = {layoutManager: {uiGroup: {add_child() {}}}};
+    get_preferred_width() { return [0, 100]; } set_position() {} set_text(t) { this.text = t; }
+    set_style() {} destroy() {} }};
+const Main = {layoutManager: {uiGroup: {add_child() {}},
+    getWorkAreaForMonitor: () => ({x: 0, y: 32, width: 800, height: 568})}};
 let ownerChanged = null;
 const global = {
     display: {focus_window: {get_id: () => 42, get_wm_class: () => "it's true", get_pid: () => 7,
@@ -73,6 +75,14 @@ def inside():
             stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=3)
         assert result.returncode != 0
         client.badge(3)
+        client.status('recording', 'rewrite', '', 4312)
+        client.status('pasted', 'dictate', 'en', 0)
+        client.clear_status()
+        # Bypass the Python allowlist: the service refuses free text in the status.
+        result = subprocess.run(['gdbus', 'call', '--session', '--dest', BUS,
+            '--object-path', PATH, '--method', BUS + '.SetStatus', 'Hallo wereld', 'dictate', '', '0'],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=3)
+        assert result.returncode != 0
         for name in ('paste', 'paste_terminal', 'ctrl_home'):
             client.shortcut(name)
         # Bypass the Python allowlist to prove the service refuses arbitrary input.
@@ -80,7 +90,7 @@ def inside():
             '--object-path', PATH, '--method', BUS + '.SendShortcut', 'Return'],
             stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=3)
         assert result.returncode != 0
-        print('PASS: actual GJS/Gio XML export and Python gdbus transport, selection metadata, badge, three shortcuts, server rejection')
+        print('PASS: actual GJS/Gio XML export and Python gdbus transport, selection metadata, badge, status box, three shortcuts, server rejection')
     finally:
         if child.poll() is None:
             subprocess.run(['ps', '-o', 'pid,args', '-p', str(child.pid)], check=True)
