@@ -71,6 +71,8 @@ Object: `/org/gnome/Shell/Extensions/DictationHelper`.
 | Activate | `(s) -> (b)` | Request activation of an existing numeric id |
 | SendShortcut | `(s) -> ()` | Only `paste`, `paste_terminal`, `ctrl_home`; everything else errors |
 | ShowBadge | `(u) -> ()` | Show "Context opgepakt: N tekens" for 1.5 s, top right of the focused window's monitor; only the number is sent |
+| SetStatus | `(s, s, s, u) -> ()` | Status box: phase code, mode code, language code (`''` or 2–3 lowercase letters) and context character count; anything else errors. The Dutch words live in the extension |
+| ClearStatus | `() -> ()` | Remove the status box |
 | SelectionInfo | `(s) -> (s, d, s, s, b)` | For `primary` or `clipboard` only: state (`set`, `cleared`, `unknown`), seconds since the owner last changed (-1 if unknown), window id focused at that change, window id focused now, and whether both belong to the same process |
 
 No selection text, MIME types or window titles cross this interface. Every process on the
@@ -85,6 +87,38 @@ The Shell creates a Clutter virtual keyboard. The allowlist is a Map, not a
 prototype-bearing object lookup. Only the keyvals for Ctrl+V, Ctrl+Shift+V and
 Ctrl+Home exist in it. Pressed keys are released in reverse order in a finally
 block. Disabling unexports D-Bus and drops the virtual device.
+
+## Status box
+
+While a session runs, the helper shows one box top right on the focused
+window's monitor, just under the top bar (the monitor's work area). It is not
+reactive and never takes focus; clicks pass through to the window below (a
+maximized window's close button lies under it). Python sends only codes and
+one count (`status_box.py`), on a thread of its own; a slow or missing helper
+never holds up recording or paste.
+
+| Phase | Shown | Hides |
+| --- | --- | --- |
+| `recording` | mode, language, context count, `● opnemen m:ss` | at the next phase |
+| `recording_silent` | as above, plus "microfoon geeft alleen stilte" | at the next phase |
+| `finishing` | `afronden… m:ss` (last recognition and stop check) | at the next phase |
+| `rewriting` | `herschrijven… m:ss` (the LLM call) | at the next phase |
+| `pasted` | `geplakt ✓` | after 1.5 s |
+| `nothing` | nothing recognised, nothing pasted | after 3 s |
+| `mic_silent`, `paste_refused`, `raw_pasted` | the problem in plain words | after 6 s |
+
+Modes: `dictate`, `rewrite` (Left-Alt), `rewrite_line` (Left-Ctrl) and
+`dictate_fallback` (rewrite requested but not configured). The language is
+shown only when it differs from the default (Left-Shift). The box replaces the
+1.5 s context badge. Only the newest session shows: a session still finishing
+behind a new one no longer updates the box. Open phases hide by themselves
+after 32 min (recording) or 15 min (others) if the dictation died; a new
+dictation process clears a left-over box at startup. A helper without
+`SetStatus` (not yet re-logged in) is journalled once as `status_box
+available: false`; the context badge is then shown instead.
+
+`output.status_box: false` turns the box off; `rewrite.context.badge` then
+decides whether the old 1.5 s badge appears. X11 has no status box.
 
 ## Selection context
 
@@ -151,8 +185,9 @@ instances at once.
 6. Complete the acceptance matrix below before upgrading other machines.
    Repeat on each target GNOME version; shell-version metadata is insufficient.
 
-To turn off only the selection features, set `rewrite.context.release_selection:
-false` and/or `rewrite.context.badge: false` in the settings file and restart
+To turn off only the selection features or the status box, set
+`rewrite.context.release_selection: false`, `rewrite.context.badge: false`
+and/or `output.status_box: false` in the settings file and restart
 the service. To return to the previous code, check out the previous commit,
 run `bash install.sh --wayland`, log out/in and restart the service.
 
@@ -220,7 +255,8 @@ systemd user manager (the shell starts an X11 services target before
 Xwayland is usable), a private HOME with only the helper enabled, and CopyQ
 shadowed by a failing stub. Two synthetic GTK4 editors and kitty run inside.
 The real fork code (App.start, context capture, selection release, badge,
-paste) runs against it; keys reach the apps via xdotool on that Xvfb and the
+paste) runs against it; with `--status` it runs the status box phases instead
+and takes a screenshot of each; keys reach the apps via xdotool on that Xvfb and the
 same keys go as synthetic evdev events into the input hub, which opens no
 device. The shell runs under strace; the result lists the `/dev` paths it
 opened. Mutter may take display `:0` when free; the probe accepts the nested

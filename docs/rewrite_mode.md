@@ -58,7 +58,9 @@ When reply context was taken (from the selection or the clipboard), a small
 green badge appears for 1.5 s in the top-right corner of the monitor that
 holds the focused window: `Context opgepakt: 4.312 tekens`. It shows only the
 length, never any of the text. It takes no focus and clicks pass through it.
-Turn it off with `rewrite.context.badge: false`.
+Turn it off with `rewrite.context.badge: false`. On GNOME Wayland the status
+box (`docs/wayland.md`) shows the count instead (`context: 4.312 tekens`) for
+the whole session; the badge appears there only with `output.status_box: false`.
 
 ## Paste safety
 

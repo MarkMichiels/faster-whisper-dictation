@@ -457,23 +457,36 @@ def run_status_cases() -> int:
         res['editor_after'] = editor_state(editors['A'])
         return res
 
+    def click_close():
+        # Same motion for the case and its control: away, onto the close button, click.
+        xdo('mousemove', '1500', '500')
+        time.sleep(0.2)
+        xdo('mousemove', '1582', '50')
+        time.sleep(0.3)
+        xdo('click', '1')
+
     def s5_click_through():
         # The box lies over the close button of a maximized window (title bar,
         # top right). A click there must reach the window: editor A closes.
+        # The first click the nested shell gets after the earlier cases may only
+        # set pointer state, so one harmless warm-up click in the text goes first.
         focus(A)
-        mark = len(JOURNAL)
-        app.status.show('recording', 'dictate', '', 0)
-        time.sleep(0.8)
-        shot('S5_klik_door_vak_voor.png')
-        xdo('mousemove', '1582', '50')
+        xdo('mousemove', '800', '500')
         time.sleep(0.2)
         xdo('click', '1')
+        time.sleep(0.5)
+        focus(A)
+        app.status.show('recording', 'dictate', '', 0)
+        time.sleep(0.8)
+        xdo('mousemove', '1582', '50')
+        time.sleep(0.3)
+        shot('S5_klik_door_vak_voor.png')   # pointer on the close button, under the box
+        xdo('click', '1')
         time.sleep(1.5)
-        shot('S5_klik_door_vak_na.png')
         gone = not h.shell.activate(A)
+        shot('S5_klik_door_vak_na.png')
         app.status.clear()
-        return dict(editor_A_closed_by_click=gone, focus_after=h.shell.focus()[1],
-                    status=[x for k, x in JOURNAL[mark:] if k == 'status_box'])
+        return dict(editor_A_closed_by_click_through_box=gone, focus_after=h.shell.focus()[1])
 
     case('S1_plain_dictation', s1_plain)
     case('S2_rewrite_with_context', s2_rewrite_context)
