@@ -22,6 +22,23 @@ declares GNOME 46–50; that is not a claim that all five versions were tested.
   combo shortcuts fail explicitly. Left-Shift chooses the alternate language,
   Left-Alt requests rewrite, Left-Ctrl requests terminal rewrite. Right-hand
   modifiers do not select modes. Repeat presses are ignored.
+- Tap timing uses the kernel time of each evdev event, not the moment the
+  reader handles it, so a first tap that stops a running session (the reader
+  is busy in `stop()`) cannot push the second tap outside `keys.tap_window_s`.
+  A second Right-Ctrl press that comes later than the window but within
+  1 s is journalled as `double_tap_slow` (interval, first hold, gap, held
+  left modifiers; no other key), because a missed start is otherwise silent.
+- Optional key trace for diagnosing missed taps, **off by default**:
+  `DICTATION_KEY_TRACE=1` journals one `key_trace` line per event of the
+  modifiers and Right-Ctrl only (`ctrl_l`, `ctrl_r`, `shift_l`, `shift_r`,
+  `alt_l`, `alt_r`, `meta_l`, `meta_r`): value (1 press, 0 release, 2 repeat),
+  kernel time, read latency and what the hub did (`passed`, `ignored_repeat`,
+  `ignored_already_down`, `ignored_not_down`, `ignored_held_elsewhere`,
+  `ignored_desynced`), plus `syn_dropped` and device add/remove. Every other
+  key is never journalled, not even as a count. For a user service, enable it
+  for one run with `systemctl --user set-environment DICTATION_KEY_TRACE=1`
+  and a service restart; remove it with `systemctl --user unset-environment
+  DICTATION_KEY_TRACE` and another restart.
 - The explicit evdev keymap contract defaults to Belgian AZERTY (`be`).
   `DICTATION_EVDEV_LAYOUT=us` selects US QWERTY. Only these two values are
   accepted. These are Linux keycodes: Ctrl+A uses KEY_Q (16) for `be`, KEY_A

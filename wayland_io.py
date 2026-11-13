@@ -7,6 +7,7 @@ import enum
 import os
 import selectors
 import subprocess
+import time
 from types import SimpleNamespace
 from typing import Any, Callable
 
@@ -141,17 +142,38 @@ keyboard = SimpleNamespace(Key=Key, HotKey=HotKey)
 mouse = SimpleNamespace(Button=Button)
 
 
+def _diagnostic(kind: str, **details: Any) -> None:
+    from coverage_ledger import diagnostic
+    diagnostic(kind, **details)
+
+
+def event_stamp(event: Any) -> float | None:
+    """Kernel time of an evdev event (CLOCK_REALTIME, like time.time()), or None."""
+    sec, usec = getattr(event, 'sec', None), getattr(event, 'usec', None)
+    if isinstance(sec, (int, float)) and isinstance(usec, (int, float)):
+        return sec + usec / 1e6
+    return None
+
+
 class InputHub:
     """One reader per device, periodic hotplug rescan, never exclusive-grab.
 
     Inject a device provider and selector in tests. Opening devices happens only
     in run(), never on import or in the constructor. Removal releases held keys.
+
+    Optional key trace (DICTATION_KEY_TRACE=1, off by default) journals one
+    'key_trace' line per event of the TRACE_CODES keys only: the modifiers and
+    Right-Ctrl, with value, kernel time, read latency and what the hub did with
+    it. Every other key is never journalled, not even as a count.
     """
     MODS = {29: Key.ctrl, 97: Key.ctrl_r, 42: Key.shift,
             54: Key.shift_r, 56: Key.alt, 100: Key.alt_r}
+    TRACE_CODES = {29: 'ctrl_l', 97: 'ctrl_r', 42: 'shift_l', 54: 'shift_r',
+                   56: 'alt_l', 100: 'alt_r', 125: 'meta_l', 126: 'meta_r'}
 
     def __init__(self, provider: Callable[[], dict[str, Callable[[], Any]]] | None = None,
-                 selector: Any = None, layout: str | None = None) -> None:
+                 selector: Any = None, layout: str | None = None,
+                 trace: bool | None = None, log: Callable[..., None] | None = None) -> None:
         self.layout = layout or os.environ.get('DICTATION_EVDEV_LAYOUT', 'be')
         if self.layout not in ('be', 'us'):
             raise ValueError('DICTATION_EVDEV_LAYOUT must be be or us')
@@ -164,6 +186,32 @@ class InputHub:
         self.running = True
         self.started = False
         self.desynced = set()
+        if trace is None:
+            trace = os.environ.get('DICTATION_KEY_TRACE', '') == '1'
+        self.trace = trace
+        self.log = log or _diagnostic
+
+    def _trace(self, path: str, event: Any, action: str) -> None:
+        """One key_trace line for a traced key or a sync loss; never raises."""
+        if not self.trace:
+            return
+        try:
+            if event.type == 1:
+                name = self.TRACE_CODES.get(event.code)
+                if name is None:
+                    return  # never any other key
+                info = dict(key=name, value=event.value)
+            elif event.type == 0 and event.code == 3:
+                info = dict(key='syn_dropped')
+            else:
+                return
+            stamp = event_stamp(event)
+            if stamp is not None:
+                info['t'] = round(stamp, 3)
+                info['read_latency_ms'] = round((time.time() - stamp) * 1000, 1)
+            self.log('key_trace', device=os.path.basename(path), action=action, **info)
+        except Exception:
+            pass
 
     @staticmethod
     def _devices() -> dict[str, Callable[[], Any]]:
@@ -182,6 +230,7 @@ class InputHub:
     def event(self, path: str, event: Any) -> None:
         # SYN_DROPPED: discard state, not a new trigger.
         if event.type == 0 and event.code == 3:
+            self._trace(path, event, 'released_all')
             self.release(path)
             self.desynced.add(path)
             return
@@ -190,24 +239,34 @@ class InputHub:
             # are reconstructed: a fresh physical release/press is required.
             if event.type == 0 and event.code == 0:
                 self.desynced.discard(path)
+            elif event.type == 1:
+                self._trace(path, event, 'ignored_desynced')
             return
-        if event.type != 1 or event.value == 2:
+        if event.type != 1:
+            return
+        if event.value == 2:
+            self._trace(path, event, 'ignored_repeat')
             return
         state = self.held.setdefault(path, set())
         code = event.code
         if event.value:
             if code in state:
+                self._trace(path, event, 'ignored_already_down')
                 return
             already = any(code in keys for keys in self.held.values())
             state.add(code)
             if already:
+                self._trace(path, event, 'ignored_held_elsewhere')
                 return
         else:
             if code not in state:
+                self._trace(path, event, 'ignored_not_down')
                 return
             state.remove(code)
             if any(code in keys for keys in self.held.values()):
+                self._trace(path, event, 'ignored_held_elsewhere')
                 return
+        self._trace(path, event, 'passed')
         if code >= 272:
             # Every button code counts for the selection-release trace,
             # touchpad contacts (BTN_TOUCH, BTN_TOOL_*) included: a tap-to-click
@@ -221,7 +280,11 @@ class InputHub:
         elif self.key_listener:
             callback = (self.key_listener.on_press if event.value
                         else self.key_listener.on_release)
-            callback(self.key(code))
+            self.key_listener.event_time = event_stamp(event)
+            try:
+                callback(self.key(code))
+            finally:
+                self.key_listener.event_time = None
 
     def release(self, path: str) -> None:
         for code in list(self.held.get(path, ())):
@@ -248,14 +311,21 @@ class InputHub:
                     continue
                 self.selector.register(device, selectors.EVENT_READ, path)
                 self.devices[path] = device
+                if self.trace and self.started:
+                    self.log('key_trace', device=os.path.basename(path), action='device_added')
             except (OSError, ValueError):
                 if device:
                     device.close()
         if not self.devices and not self.started:
             raise RuntimeError('No readable evdev input devices; check input group and login')
+        if self.trace and not self.started:
+            self.log('key_trace', action='enabled',
+                     devices=sorted(os.path.basename(p) for p in self.devices))
         self.started = True
 
     def remove(self, path: str) -> None:
+        if self.trace:
+            self.log('key_trace', device=os.path.basename(path), action='device_removed')
         self.release(path)
         device = self.devices.pop(path)
         self.selector.unregister(device)

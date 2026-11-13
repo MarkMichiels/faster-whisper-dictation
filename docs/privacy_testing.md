@@ -167,6 +167,10 @@ from the actual installed source directory, not an unrelated source copy.
   warning/limit incidents are journal-only, not desktop popups.
 - `cuda_oom_snapshot`: bounded read-only GPU allocation diagnostic on a matching
   CUDA out-of-memory exception; it does not retry or restart by itself.
+- `double_tap_slow`: a second start-key press came after the double-tap window
+  (but within 1 s), so nothing started; timing and held left modifiers only.
+- `key_trace` (Wayland, only with `DICTATION_KEY_TRACE=1`): one line per
+  modifier or Right-Ctrl event; never any other key. See [Wayland](wayland.md).
 
 Check `correction_delivery_failures` as well as `unresolved_ranges`; having
 recognised recovery words does not mean their paste succeeded. Likewise,

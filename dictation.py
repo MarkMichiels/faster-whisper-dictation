@@ -1297,6 +1297,14 @@ class MultiTapKeyListener():
     """
 
     TAP_WINDOW = 0.3   # max seconds between taps for double-tap
+    # A second press later than TAP_WINDOW but within this is journalled as
+    # 'double_tap_slow' (timing and modifier flags only): a missed start is
+    # otherwise silent.
+    SLOW_TAP_S = 1.0
+    # Wayland: kernel time of the evdev event being handled, set by the input
+    # hub around each callback. Tap timing then does not depend on how long an
+    # earlier callback (stop, start) kept the reader busy. None on X11.
+    event_time = None
     META_L_VK = 0xffe7  # keysym Meta_L: Left-Alt pressed or released while Shift is held
     # Optional selection_release.InputTrace: Ctrl+A, other keys (no key text kept).
     trace = None
@@ -1322,6 +1330,7 @@ class MultiTapKeyListener():
         self.mod_times = {'shift': [None, None], 'alt': [None, None], 'ctrl': [None, None],
                           'shift_r': [None, None]}
         self.last_press_time = 0
+        self.last_release_time = None
         self.tap_count = 0
         self.lang_last_press_time = 0
         self.lang_tap_count = 0
@@ -1346,8 +1355,31 @@ class MultiTapKeyListener():
     def _is_left_alt(self, key, name):
         return name in ('alt', 'alt_l') or (name is None and self._get_vk(key) == self.META_L_VK)
 
+    def _now(self):
+        """Time of the event being handled: the evdev kernel time when the hub
+        provides a plausible one, else now."""
+        now = time.time()
+        stamp = self.event_time
+        if stamp is None or not -5 < now - stamp < 5:
+            return now
+        return stamp
+
     def _mod_event(self, mod, pressed):
-        self.mod_times[mod][0 if pressed else 1] = time.time()
+        self.mod_times[mod][0 if pressed else 1] = self._now()
+
+    def _journal_slow_tap(self, interval, now):
+        """A double tap that came too late to start: metadata only, never raises."""
+        try:
+            info = dict(interval_s=round(interval, 3), window_s=self.TAP_WINDOW,
+                        clock='event' if self.event_time is not None else 'process',
+                        shift=self.shift_held, alt=self.alt_held, ctrl=self.ctrl_held)
+            released = self.last_release_time
+            if released is not None and self.last_press_time <= released <= now:
+                info['first_hold_s'] = round(released - self.last_press_time, 3)
+                info['gap_s'] = round(now - released, 3)
+            diagnostic('double_tap_slow', **info)
+        except Exception:
+            pass
 
     def keys_info(self, now=None):
         """Modifier state at the second tap: metadata only, no key text."""
@@ -1433,10 +1465,13 @@ class MultiTapKeyListener():
             if self.main_down:
                 return  # autorepeat is not a second tap
             self.main_down = True
-            current_time = time.time()
-            if current_time - self.last_press_time < self.TAP_WINDOW:
+            current_time = self._now()
+            interval = current_time - self.last_press_time
+            if interval < self.TAP_WINDOW:
                 self.tap_count += 1
             else:
+                if self.tap_count == 1 and interval < self.SLOW_TAP_S:
+                    self._journal_slow_tap(interval, current_time)
                 self.tap_count = 1
             self.last_press_time = current_time
 
@@ -1466,6 +1501,8 @@ class MultiTapKeyListener():
     def on_release(self, key):
         name = getattr(key, 'name', None)
         if self._key_matches(key, self.key):
+            if self.main_down:
+                self.last_release_time = self._now()
             self.main_down = False
         if self._get_vk(key) == 65508:
             self.right_ctrl_down = False
