@@ -5,6 +5,7 @@ The explicit keymap contract is documented in docs/wayland.md.
 """
 import enum
 import os
+import re
 import selectors
 import subprocess
 import time
@@ -18,7 +19,10 @@ SELECTIONS = frozenset(('primary', 'clipboard'))
 # Status box codes (the words live in the extension). Never text.
 STATUS_PHASES = frozenset(('recording', 'recording_silent', 'finishing', 'rewriting', 'pasted',
                            'nothing', 'mic_silent', 'paste_refused', 'raw_pasted'))
-STATUS_MODES = frozenset(('dictate', 'rewrite', 'rewrite_line', 'dictate_fallback'))
+STATUS_MODES = frozenset(('dictate', 'rewrite', 'rewrite_line', 'dictate_fallback', 'research'))
+# Research box (SetResearch): phase codes and a step/reason code; never text.
+RESEARCH_PHASES = frozenset(('researching', 'done', 'clipboard', 'failed'))
+RESEARCH_STEP_RE = re.compile(r'[a-z][a-z0-9_.:-]{0,39}')
 
 
 def parse_gvariant_text(text: str) -> Any:
@@ -120,6 +124,14 @@ class ShellClient:
 
     def clear_status(self) -> None:
         self._call('ClearStatus')
+
+    def research(self, phase: str, step: str = '', seconds: int = 0, steps: int = 0) -> None:
+        """Show the research box: a phase, a step or reason code, elapsed seconds and
+        the number of tool steps. Codes only; the words live in the extension."""
+        if phase not in RESEARCH_PHASES or not (step == '' or RESEARCH_STEP_RE.fullmatch(step)):
+            raise ValueError('research status not allowed')
+        self._call('SetResearch', "'%s'" % phase, "'%s'" % step,
+                   str(max(0, int(seconds))), str(max(0, int(steps))))
 
 
 class Key(enum.Enum):
@@ -243,6 +255,9 @@ class InputHub:
     def key(self, code: int) -> Key | SimpleNamespace:
         if code in self.MODS:
             return self.MODS[code]
+        if code == 1:
+            # Escape: research mode may cancel on it (X11 keysym Escape, name 'esc').
+            return SimpleNamespace(vk=0xff1b, char=None, name='esc')
         # Linux evdev codes, not X keycodes. be AZERTY: physical Q -> a.
         a_code, c_code = (16, 46) if self.layout == 'be' else (30, 46)
         char = 'a' if code == a_code else 'c' if code == c_code else None
@@ -434,6 +449,9 @@ def bind(replayer: type, tap_listener: type, mouse_listener: type) -> tuple[type
 
         def clear_status(self) -> None:
             self.shell.clear_status()
+
+        def show_research(self, phase: str, step: str = '', seconds: int = 0, steps: int = 0) -> None:
+            self.shell.research(phase, step, seconds, steps)
 
     class WaylandTap(tap_listener):
         def run(self) -> None:

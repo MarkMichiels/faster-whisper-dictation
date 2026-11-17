@@ -57,6 +57,8 @@ class Setting:
     choices: tuple = ()
     low: Optional[float] = None
     high: Optional[float] = None
+    pattern: Optional[str] = None  # full-match regex for a string value
+    pattern_reason: str = 'not_allowed'
 
 
 def _s(*args, **kwargs) -> Setting:
@@ -65,6 +67,11 @@ def _s(*args, **kwargs) -> Setting:
 
 _RW = 'DICTATION_REWRITE_'
 REASONING_CHOICES = ('never', 'email', 'always')
+# Research mode: the Pi providers a session may use. Anything else is refused
+# when the file is loaded (the default model then applies).
+RESEARCH_PROVIDERS = ('anthropic', 'openai-codex', 'openrouter')
+RESEARCH_MODEL_RE = r'(?:%s)/[A-Za-z0-9][A-Za-z0-9._:/-]{0,120}' % '|'.join(re.escape(p) for p in RESEARCH_PROVIDERS)
+THINKING_CHOICES = ('off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max')
 
 # One table: defaults here are exactly the code defaults. argparse defaults,
 # validation, docs/configuration.md and config.example.yaml all come from it.
@@ -160,6 +167,24 @@ SCHEMA: tuple[Setting, ...] = (
        low=0, high=36_500),
     _s('log.context_max_chars', 'int', 0, 'Most characters of context stored per call (beginning and end); '
        '0 = all that was sent.', low=0, high=500_000),
+    _s('research.enabled', 'bool', False, 'Research mode (AltGr + double tap): the dictation starts one autonomous '
+       'Pi session in the background and its result is pasted (docs/research.md). Off: AltGr dictates normally.'),
+    _s('research.pi_bin', 'str?', None, 'Absolute path of the pi executable; research mode needs it.'),
+    _s('research.node_bin', 'str?', None, 'Absolute path of node when it is not on the service PATH '
+       '(e.g. nvm); null = node from PATH.'),
+    _s('research.model', 'str', 'anthropic/claude-sonnet-5-5', 'Pi model as provider/id. Allowed providers: '
+       + ', '.join(RESEARCH_PROVIDERS) + '; any other is refused.', pattern=RESEARCH_MODEL_RE,
+       pattern_reason='provider_not_allowed'),
+    _s('research.thinking', 'str', 'medium', 'Pi thinking level.', choices=THINKING_CHOICES),
+    _s('research.cwd', 'str?', None, 'Working directory of the session (its AGENTS.md and skills apply); '
+       'research mode needs it.'),
+    _s('research.notes_dir', 'str', 'research_notes', 'Directory, relative to research.cwd, where the session '
+       'may write its own note; nothing else is writable.'),
+    _s('research.proposals', 'bool', True, 'The session may also add a new file in a folder named issues/ or '
+       'insert (never change or delete) lines in a PLAN.md under research.cwd.'),
+    _s('research.timeout_s', 'int', 600, 'Hard stop of a session in seconds.', low=30, high=3600),
+    _s('research.visible', 'bool', True, 'Show the session in the Pi dashboard (PI_DASHBOARD_VISIBLE=1).'),
+    _s('research.escape_cancels', 'bool', True, 'Escape cancels a running session (AltGr + double tap always does).'),
 )
 BY_PATH = {s.path: s for s in SCHEMA}
 GROUPS = tuple(dict.fromkeys(s.path.split('.')[0] for s in SCHEMA))
@@ -217,6 +242,8 @@ def _check(setting: Setting, value: Any) -> tuple[Any, Optional[str]]:
         return None, None
     if setting.choices and value not in setting.choices:
         return None, 'not_a_choice'
+    if setting.pattern and not re.fullmatch(setting.pattern, value):
+        return None, setting.pattern_reason
     texts = value if isinstance(value, list) else [value]
     if any(_SECRET_VALUE_RE.search(t) for t in texts):
         return None, 'looks_like_secret'

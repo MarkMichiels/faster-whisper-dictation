@@ -1283,9 +1283,13 @@ class MultiTapKeyListener():
     Left-Alt (momentary, no state kept): held while the double-tap fires →
     rewrite mode for that session; Left-Shift then selects the language the
     rewrite is written in (the app decides what that means for recognition).
-    Right-Alt (AltGr, 'alt_gr'/'alt_r') is ignored. With Shift already held, X
-    reports the Left-Alt key as Meta_L (its second keymap level), so Meta_L
-    counts as Left-Alt for press and release alike.
+    With Shift already held, X reports the Left-Alt key as Meta_L (its second
+    keymap level), so Meta_L counts as Left-Alt for press and release alike.
+
+    Right-Alt (AltGr: 'alt_gr' on X11, 'alt_r' from evdev) held while the
+    double-tap fires → research mode: keys gets research=True, rewrite stays
+    False. AltGr wins over Left-Alt/Left-Ctrl; Left-Shift still selects the
+    language. Escape calls escape_callback (if set) and is otherwise ignored.
 
     Left-Ctrl (vk 65507) also requests rewrite and selects terminal mode.
     It takes priority over Left-Alt; Right-Ctrl (vk 65508) only counts taps.
@@ -1309,6 +1313,10 @@ class MultiTapKeyListener():
     # earlier callback (stop, start) kept the reader busy. None on X11.
     event_time = None
     META_L_VK = 0xffe7  # keysym Meta_L: Left-Alt pressed or released while Shift is held
+    ALTGR_VKS = (0xfe03, 0xffea)   # ISO_Level3_Shift, Alt_R (X11); evdev Key.alt_r is 65514 = 0xffea
+    ESCAPE_VK = 0xff1b
+    # Called (no arguments) on every Escape press; research mode cancels with it.
+    escape_callback = None
     # Optional selection_release.InputTrace: Ctrl+A, other keys (no key text kept).
     trace = None
 
@@ -1326,12 +1334,13 @@ class MultiTapKeyListener():
         self.alt_held = False
         self.alt_as_meta = False
         self.ctrl_held = False
+        self.altgr_held = False
         self.right_shift_held = False  # journal only: Right-Shift never selects a language
         self.right_ctrl_down = False  # only for recognising Ctrl+A, never a rewrite modifier
         self.main_down = False
         # Last press / release time per modifier, for the journal only.
         self.mod_times = {'shift': [None, None], 'alt': [None, None], 'ctrl': [None, None],
-                          'shift_r': [None, None]}
+                          'shift_r': [None, None], 'altgr': [None, None]}
         self.last_press_time = 0
         self.last_release_time = None
         self.tap_count = 0
@@ -1357,6 +1366,12 @@ class MultiTapKeyListener():
 
     def _is_left_alt(self, key, name):
         return name in ('alt', 'alt_l') or (name is None and self._get_vk(key) == self.META_L_VK)
+
+    def _is_altgr(self, key, name):
+        return name in ('alt_gr', 'alt_r') or (name is None and self._get_vk(key) in self.ALTGR_VKS)
+
+    def _is_escape(self, key, name):
+        return name in ('esc', 'escape') or self._get_vk(key) == self.ESCAPE_VK
 
     def _now(self):
         """Time of the event being handled: the evdev kernel time when the hub
@@ -1397,6 +1412,15 @@ class MultiTapKeyListener():
                 info[mod + '_released_s_ago'] = round(now - up, 3)
         if self.alt_held and self.alt_as_meta:
             info['alt_as_meta'] = True
+        # AltGr (research mode): only when held or released before, so ordinary
+        # starts keep their journal shape.
+        if self.altgr_held or self.mod_times['altgr'][1] is not None:
+            down, up = self.mod_times['altgr']
+            info['altgr'] = self.altgr_held
+            if self.altgr_held and down is not None:
+                info['altgr_held_s'] = round(now - down, 3)
+            elif up is not None:
+                info['altgr_released_s_ago'] = round(now - up, 3)
         # Right-Shift is ignored for the language, but a start where the user meant
         # Shift and the service saw only Right-Shift must be recognisable.
         if self.right_shift_held or self.mod_times['shift_r'][1] is not None:
@@ -1409,8 +1433,8 @@ class MultiTapKeyListener():
         return info
 
     def modifiers_held(self):
-        """A start modifier (Left Alt, Left Ctrl, Left Shift) is still down."""
-        return self.alt_held or self.ctrl_held or self.shift_held
+        """A start modifier (Left Alt, Left Ctrl, Left Shift, AltGr) is still down."""
+        return self.alt_held or self.ctrl_held or self.shift_held or self.altgr_held
 
     def _trace_press(self, key):
         """Feed the input trace; cheap, never raises, keeps no key text."""
@@ -1458,6 +1482,19 @@ class MultiTapKeyListener():
                 self.alt_as_meta = name is None
             self.alt_held = True
             return
+        if self._is_altgr(key, name):
+            if not self.altgr_held:
+                self._mod_event('altgr', True)
+            self.altgr_held = True
+            return
+        if self._is_escape(key, name):
+            callback = self.escape_callback
+            if callback is not None:
+                try:
+                    callback()
+                except Exception:
+                    pass
+            return
         # Left-Ctrl was handled by vk above. Never derive it from a global
         # Ctrl state: that would also include the Right-Ctrl start key.
         if name in ('ctrl', 'alt'):
@@ -1482,8 +1519,13 @@ class MultiTapKeyListener():
                 language = self.shift_language if self.shift_held else self.default_language
                 self.tap_count = 0
                 self.last_press_time = 0
-                self.activate_callback(language, self.alt_held or self.ctrl_held,
-                                       self.keys_info(current_time))
+                keys = self.keys_info(current_time)
+                if self.altgr_held:
+                    # Research wins over rewrite: AltGr is the most deliberate chord.
+                    keys['research'] = True
+                    self.activate_callback(language, False, keys)
+                else:
+                    self.activate_callback(language, self.alt_held or self.ctrl_held, keys)
             elif self.tap_count == 1:
                 self.deactivate_callback()
 
@@ -1525,6 +1567,10 @@ class MultiTapKeyListener():
             if self.alt_held:
                 self._mod_event('alt', False)
             self.alt_held = False
+        elif self._is_altgr(key, name):
+            if self.altgr_held:
+                self._mod_event('altgr', False)
+            self.altgr_held = False
 
     def run(self):
         with keyboard.Listener(
@@ -1940,7 +1986,7 @@ class App():
 
         def __init__(self, transcription_queue, typing_queue, ledger=None, recorder=None,
                      previous=None, language=_UNSET, target_wid=None, rewrite=False,
-                     output_language=_UNSET, terminal_mode=False):
+                     output_language=_UNSET, terminal_mode=False, research=False):
             self.transcription_queue = transcription_queue
             self.typing_queue = typing_queue
             self.ledger = ledger
@@ -1953,8 +1999,12 @@ class App():
             # active at stop (paste_wid). context lives only in this object
             # and is cleared when the session ends.
             self.rewrite = rewrite
+            # Research mode records like rewrite mode (held text, context), but at
+            # stop hands the dictation to a background Pi session (research.py).
+            self.research = research
             self.terminal_mode = terminal_mode
-            self.mode = 'terminal' if terminal_mode else 'rich' if rewrite else 'plain'
+            self.mode = ('research' if research else 'terminal' if terminal_mode
+                         else 'rich' if rewrite else 'plain')
             # Language the rewrite is written in; by default the recognition language.
             self.output_language = language if output_language is _UNSET else output_language
             self.context = None
@@ -1966,8 +2016,8 @@ class App():
             self.done = threading.Event()
             # Status box: (mode code, language code, context characters), and
             # counts only. Never any text of the session.
-            self.status_info = ('rewrite_line' if rewrite and terminal_mode else 'rewrite' if rewrite else 'dictate',
-                                '', 0)
+            self.status_info = ('research' if research else 'rewrite_line' if rewrite and terminal_mode
+                                else 'rewrite' if rewrite else 'dictate', '', 0)
             self.status_final = False
             self.mic_silent = False
             self.pasted = 0
@@ -2017,6 +2067,20 @@ class App():
             except Exception as exc:  # never stop dictation for the log
                 diagnostic('llm_log_unavailable', error=type(exc).__name__)
         self.status = self._make_status_box()
+        # Research mode (AltGr + double tap): optional; off by default.
+        self.research_config, self.research_reason, self.research_runner = None, 'disabled', None
+        self._paste_lock = threading.Lock()
+        self._dictation_box_until = 0.0
+        self._box_writes = 0
+        if getattr(args, 'settings', None) is not None:
+            try:
+                import research
+                self.research_config, self.research_reason = research.load_config(args.settings)
+                if self.research_config is not None:
+                    self.research_runner = research.Runner(self.research_config, log=diagnostic)
+            except Exception as exc:  # never stop dictation for research mode
+                self.research_reason = 'error_' + type(exc).__name__
+        diagnostic('research_config', available=self.research_runner is not None, reason=self.research_reason)
 
     def _make_status_box(self):
         """Wayland: the status box through the helper; None elsewhere or when off."""
@@ -2041,8 +2105,15 @@ class App():
                 session.status_final = True
             mode, language, chars = session.status_info
             box.show(phase, mode, language, chars)
+            # The research box waits until this phase has had its time on screen.
+            self._dictation_box_until = (time.monotonic() + self.DICTATION_HOLD_S.get(phase, 3.1)
+                                         if final else float('inf'))
+            self._box_writes = getattr(self, '_box_writes', 0) + 1
         except Exception as exc:
             diagnostic('status_box', sent=False, error=type(exc).__name__)
+
+    # Seconds a final dictation phase keeps the box (the extension's hide times).
+    DICTATION_HOLD_S = {'pasted': 1.6, 'nothing': 3.1}
 
     def _status_end(self, session):
         """Final phase of a plain dictation session, from counts only."""
@@ -2123,7 +2194,20 @@ class App():
             return None
         started_at = time.monotonic()
         start_sound = 'start_recording'
-        if rewrite_mode:
+        research_mode = bool(keys and keys.get('research'))
+        if research_mode:
+            runner = getattr(self, 'research_runner', None)
+            if runner is not None and runner.busy:
+                # AltGr + double tap while a session runs: cancel it, record nothing.
+                self._research_cancel('hotkey')
+                return None
+            if runner is None:
+                diagnostic('research_unavailable', reason=getattr(self, 'research_reason', 'disabled'))
+                research_mode = False
+                start_sound = 'rewrite_unavailable'
+            else:
+                rewrite_mode = True   # record and hold like rewrite mode
+        if rewrite_mode and not research_mode:
             unavailable = rewrite.availability(getattr(self, 'rewrite_config', None),
                                                getattr(self, 'rewrite_reason', None))
             if unavailable:
@@ -2146,17 +2230,19 @@ class App():
         # a previous session that ends meanwhile must see it is no longer the
         # current one, or it would clear `active` while this one records.
         spoken = language
-        if rewrite_mode and language is not _UNSET:
+        if rewrite_mode and not research_mode and language is not _UNSET:
             spoken = getattr(getattr(self, 'args', None), 'language', None)
         session = self.Session(self.transcription_queue, self.typing_queue, self.ledger,
                                None, previous, spoken, None, rewrite=rewrite_mode,
-                               output_language=language, terminal_mode=bool(keys and keys.get('ctrl')))
+                               output_language=language, research=research_mode,
+                               terminal_mode=bool(keys and keys.get('ctrl')) and not research_mode)
         self.ledger.on_digital_silence = lambda: self._mic_silent_alert(session)
         self.session = session
         import status_box  # local: tests load App without module imports
         default = getattr(getattr(self, 'args', None), 'language', None)
         shown = language if rewrite_mode else spoken
         session.status_info = (
+            'research' if research_mode else
             status_box.mode_of(rewrite_mode, session.terminal_mode, start_sound == 'rewrite_unavailable'),
             '' if shown is _UNSET or shown == default else status_box.language_code(shown), 0)
         start_meta = dict(language='unchanged' if spoken is _UNSET else spoken or 'auto')
@@ -2165,7 +2251,8 @@ class App():
         if keys:
             start_meta['keys'] = keys
         diagnostic('session_start', max_seconds=MAX_SECONDS, pcm_bytes_per_minute=RATE*2*60,
-                   rewrite=rewrite_mode, mode=session.mode, **start_meta)
+                   rewrite=rewrite_mode and not research_mode, research=research_mode, mode=session.mode,
+                   **start_meta)
         # Create fresh recorder and start BEFORE beep so no audio is missed
         self.recorder = StreamingRecorder(
             self.transcription_queue,
@@ -2188,7 +2275,8 @@ class App():
             # Wayland: age and origin of the selection come from the shell extension.
             if globals().get('WAYLAND', False):
                 options['shell'] = getattr(self.replayer, 'shell', None)
-            context = context_capture.capture(max_chars=self.rewrite_config.context_max_chars, **options)
+            max_chars = getattr(getattr(self, 'rewrite_config', None), 'context_max_chars', None) or 100_000
+            context = context_capture.capture(max_chars=max_chars, **options)
             read_done = time.monotonic()
             session.context = context.text
             session.context_secret = 'secret_hint' in (context.reasons or {}).values()
@@ -2492,6 +2580,7 @@ class App():
             if not getattr(session, 'status_final', True) and getattr(self, 'status', None) is not None \
                     and session is getattr(self, 'session', None):
                 self.status.clear()
+                self._dictation_box_until = 0.0
             # Context is reply material for this one session only.
             session.context = None
             # Release the next session even if this one failed.
@@ -2541,6 +2630,9 @@ class App():
             diagnostic('rewrite_skipped', reason='no_text')
             self._status(session, 'mic_silent' if getattr(session, 'mic_silent', False) else 'nothing',
                          final=True)
+            return
+        if getattr(session, 'research', False):
+            self._start_research(session, raw)
             return
         self._status(session, 'rewriting')
         # Raw text first into CopyQ history, so it survives any later failure.
