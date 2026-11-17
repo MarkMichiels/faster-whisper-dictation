@@ -120,9 +120,10 @@ formatting or ownership record contains text.
    them (`punten`/`points`), and only then writes the text: its own order and
    sentences, each thought once, no closing recap, in the user's own voice,
    nothing invented or dropped. The planning fields are never pasted or
-   logged. This costs roughly half a second more than writing directly;
-   model reasoning stays off because it added about four seconds for little
-   gain.
+   logged. This costs roughly half a second more than writing directly.
+   Model reasoning is off by default; `rewrite.reasoning: email` or `always`
+   turns on low-effort reasoning, which gave better order and fewer leftover
+   repetitions but added about four seconds (up to nine) per rewrite.
 4. The answer is checked: empty, more than 1.2x or fewer than 0.15x the raw
    word count, an introduction ("Here is…"), a truncated or malformed answer all
    count as failure. Quotes or a code fence around the whole answer are removed.
@@ -291,13 +292,15 @@ YAML key:
 | `DICTATION_REWRITE_PROVIDER_ORDER` (`rewrite.provider_order`) | Optional OpenRouter provider preference |
 | `DICTATION_REWRITE_STYLE_FILE` (`rewrite.style_file`) | Optional few lines of preferences, sent with every request |
 | `DICTATION_REWRITE_TERMS_FILE` (`rewrite.terms_file`) | Optional term list the model must spell exactly |
+| `DICTATION_REWRITE_REASONING` (`rewrite.reasoning`) | Optional model reasoning: `never` (default), `email` (only when an email may be built) or `always`; about 4 s slower |
 | `DICTATION_REWRITE_WORD_FACTOR` (`rewrite.word_factor`) | Optional: for dictations above 120 words, ask for at most factor x words (default off) |
 | `DICTATION_REWRITE_CONTEXT_MAX_CHARS` (`rewrite.context.max_chars`) | Optional: most characters of reply context sent, 1,000–500,000 (default 100,000). An invalid value falls back to the default; the journal then gets `rewrite_setting_invalid` with the reason, never the value |
 | `DICTATION_REWRITE_SIGNATURE` (`rewrite.signature`) | Optional name under the sign-off of an email; a literal `\n` starts a new line (max. 200 characters). Without it the sign-off line stands alone |
 
 Every request also sends `provider: {zdr: true, data_collection: "deny",
 require_parameters: true}` (OpenRouter: only zero-data-retention endpoints, no
-training use) and `reasoning: {enabled: false}`. Other OpenAI-compatible servers
+training use) and `reasoning: {enabled: false}` (or `{effort: "low"}` when
+`rewrite.reasoning` asks for it). Other OpenAI-compatible servers
 ignore these fields.
 
 After editing the file, restart the service at a moment without a recording.
