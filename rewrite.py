@@ -40,6 +40,7 @@ import re
 import threading
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from dataclasses import dataclass
 from typing import Any, Callable, Optional
@@ -495,10 +496,23 @@ class RewriteResult:
     # For the LLM log (llm_log.py), never for the journal: the journal record
     # metadata (no text), the model's composed answer (also when it was
     # rejected) and the system prompt sent (the log keeps only its hash).
-    # meta is None when no call was attempted.
+    # meta is None when no call was attempted. call: what the endpoint did
+    # (sent, received, HTTP status, response id, served model, usage as
+    # reported, transport, start time) plus the request and the raw answer,
+    # which the log only hashes for its llm-call/1 record.
     meta: Optional[dict[str, Any]] = None
     answer: Optional[str] = None
     system_prompt: Optional[str] = None
+    call: Optional[dict[str, Any]] = None
+
+
+def transport(endpoint: str) -> str:
+    """Short access-route code from the endpoint host (never the path or a key)."""
+    host = (urllib.parse.urlsplit(endpoint).hostname or '').lower()
+    for name in ('openrouter', 'openai', 'anthropic'):
+        if host == name + '.ai' or host.endswith('.' + name + '.ai') or host.endswith(name + '.com'):
+            return name
+    return host or 'unknown'
 
 
 def rewrite(raw: str, language: Optional[str], context: Optional[str],
@@ -530,6 +544,9 @@ def rewrite(raw: str, language: Optional[str], context: Optional[str],
     meta['reasoning'] = think
     system = messages[0]['content']
     composed: Optional[str] = None
+    attempt: dict[str, Any] = dict(started=time.time(), sent=True, received=False, http_status=None,
+                                   response_id=None, model=None, usage=None, transport=transport(config.endpoint),
+                                   request=json.dumps(messages, ensure_ascii=False), response=None)
     body = {
         'model': config.model,
         'messages': messages,
@@ -543,12 +560,17 @@ def rewrite(raw: str, language: Optional[str], context: Optional[str],
     call = call or http_call
     try:
         data = _with_deadline(lambda: call(config, body, config.timeout_s), config.timeout_s)
+        if isinstance(data, dict):
+            usage_raw = data.get('usage')
+            attempt.update(received=True, http_status=200, response_id=data.get('id'), model=data.get('model'),
+                           usage=usage_raw if isinstance(usage_raw, dict) else None)
         if isinstance(data, dict) and data.get('error'):
             error = data['error']
             raise RewriteError('provider_error', code=error.get('code') if isinstance(error, dict) else None)
         try:
             choice = data['choices'][0]
             content = choice['message']['content']
+            attempt['response'] = content if isinstance(content, str) else None
         except (KeyError, IndexError, TypeError):
             raise RewriteError('invalid_response')
         if choice.get('finish_reason') == 'length':
@@ -594,12 +616,19 @@ def rewrite(raw: str, language: Optional[str], context: Optional[str],
         if problem:
             raise RewriteError(problem)
     except RewriteError as exc:
+        if exc.reason == 'key_unreadable':
+            attempt['sent'] = False
+        elif exc.reason.startswith('http_') and exc.reason[5:].isdigit():
+            attempt['http_status'] = int(exc.reason[5:])
         meta.setdefault('seconds', round(time.monotonic() - t0, 3))
         diagnostic('rewrite_failed', reason=exc.reason, **dict(meta, **exc.details))
-        return RewriteResult(raw, False, exc.reason, meta=meta, answer=composed, system_prompt=system)
+        return RewriteResult(raw, False, exc.reason, meta=meta, answer=composed, system_prompt=system,
+                             call=attempt)
     except Exception as exc:  # noqa: BLE001 - never lose the dictation
         meta.setdefault('seconds', round(time.monotonic() - t0, 3))
         diagnostic('rewrite_failed', reason='exception', error=type(exc).__name__, **meta)
-        return RewriteResult(raw, False, 'exception', meta=meta, answer=composed, system_prompt=system)
+        return RewriteResult(raw, False, 'exception', meta=meta, answer=composed, system_prompt=system,
+                             call=attempt)
     diagnostic('rewrite_outcome', result='rewritten', **meta)
-    return RewriteResult(out, True, html=html, meta=meta, answer=composed, system_prompt=system)
+    return RewriteResult(out, True, html=html, meta=meta, answer=composed, system_prompt=system,
+                         call=attempt)

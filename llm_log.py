@@ -1,7 +1,10 @@
 """Searchable local log of every LLM call (rewrite now; research sessions later).
 
-One SQLite database in WAL mode with an FTS5 index over the text columns,
-outside the repository: $XDG_DATA_HOME/faster-whisper-dictation/llm_log.db
+One SQLite database in WAL mode, outside the repository, with two tables:
+llm_call holds one content-free record per direct call in the shared
+llm-call/1 form (model, provider, times, tokens, cost, status, sha256 of
+request and answer); llm_content holds the text with an FTS5 index, keyed by
+the same request_id. File: $XDG_DATA_HOME/faster-whisper-dictation/llm_log.db
 (directory 0700, file 0600). Reference: docs/llm_log.md.
 
 Never in the paste path: the dictation thread only calls LlmLog.record(),
@@ -18,7 +21,8 @@ Privacy gates that no setting can switch off:
 - no audio, no request headers, no endpoint or key.
 
 Retention (log.text_days, log.meta_days): the text columns are wiped after
-text_days, the metadata row is deleted after meta_days. secure_delete, an FTS
+text_days (the llm_call record and its sha256 stay), both rows are deleted
+after meta_days. secure_delete, an FTS
 'optimize' and a WAL checkpoint keep wiped text out of free pages and the WAL.
 The job runs when the writer starts (service start) and then once a day inside
 the service; no separate timer.
@@ -41,6 +45,7 @@ import stat
 import sys
 import threading
 import time
+import uuid
 from typing import Any, Callable, Optional
 
 APP_DIR = 'faster-whisper-dictation'
@@ -111,17 +116,77 @@ def resolve_path(configured: Optional[str], environ=None) -> str:
     return os.path.expanduser(configured) if configured else default_path(environ)
 
 
-SCHEMA_SQL = """
-CREATE TABLE IF NOT EXISTS calls(
-  id INTEGER PRIMARY KEY,
-  ts TEXT NOT NULL,              -- ISO 8601, local time with offset
+# Content-free call record, exactly the shared llm-call/1 contract (flat SQLite
+# form). Nothing of the text ever goes in here; usage tellers are as the
+# provider reported them, a missing value stays NULL (unknown), never 0.
+CALL_COLUMNS = (
+    'schema', 'ts', 'request_id', 'response_id', 'provider_request_id', 'producer', 'caller', 'step',
+    'traffic', 'session_id', 'parent_session_id', 'correlation_id', 'assignment_project',
+    'assignment_session_id', 'provider', 'model', 'transport', 'route', 'execution_status',
+    'http_status', 'error', 'duration_s', 'prompt_tokens', 'completion_tokens', 'cached_tokens',
+    'cache_write_tokens', 'reasoning_tokens', 'usage_complete', 'cost_usd', 'price_basis',
+    'content_store', 'content_key', 'input_sha256', 'input_bytes', 'output_sha256', 'output_bytes',
+)
+CALL_SCHEMA = 'llm-call/1'
+CALL_SQL = """
+CREATE TABLE IF NOT EXISTS llm_call (
+  request_id TEXT PRIMARY KEY,
+  schema TEXT NOT NULL CHECK (schema = 'llm-call/1'),
+  ts TEXT NOT NULL,
+  producer TEXT NOT NULL,
+  response_id TEXT,
+  provider_request_id TEXT,
+  caller TEXT,
+  step TEXT,
+  traffic TEXT NOT NULL,
+  session_id TEXT,
+  parent_session_id TEXT,
+  correlation_id TEXT,
+  assignment_project TEXT,
+  assignment_session_id TEXT,
+  provider TEXT NOT NULL,
+  model TEXT NOT NULL,
+  transport TEXT,
+  route TEXT,
+  execution_status TEXT NOT NULL,
+  http_status INTEGER,
+  error TEXT,
+  duration_s REAL,
+  prompt_tokens INTEGER,
+  completion_tokens INTEGER,
+  cached_tokens INTEGER,
+  cache_write_tokens INTEGER,
+  reasoning_tokens INTEGER,
+  usage_complete INTEGER NOT NULL CHECK (usage_complete IN (0, 1)),
+  cost_usd REAL,
+  price_basis TEXT NOT NULL,
+  content_store TEXT,
+  content_key TEXT,
+  input_sha256 TEXT,
+  input_bytes INTEGER,
+  output_sha256 TEXT,
+  output_bytes INTEGER
+);
+CREATE UNIQUE INDEX IF NOT EXISTS llm_call_response_id ON llm_call(response_id) WHERE response_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS llm_call_ts ON llm_call(ts);
+"""
+
+# This application's own table: the text, its search index and retention,
+# plus what only this application knows (mode, delivery, prompt hash). Keyed
+# by request_id; a rewrite row has a matching llm_call row. A research row
+# (a Pi session, which gets no llm-call record) has only this row.
+CONTENT_COLUMNS = ('request_id', 'epoch', 'ts', 'kind', 'mode', 'language', 'prompt_version', 'status',
+                   'reason', 'delivered', 'context', 'input', 'output', 'secrets_replaced',
+                   'pi_session_id', 'pi_session_file')
+CONTENT_SQL = """
+CREATE TABLE IF NOT EXISTS llm_content(
+  request_id TEXT PRIMARY KEY,   -- = llm_call.request_id for a direct call
   epoch REAL NOT NULL,           -- seconds since 1970, for retention
+  ts TEXT NOT NULL,              -- ISO 8601, local time with offset
   kind TEXT NOT NULL,            -- rewrite | research
   mode TEXT,                     -- opmaak | regel | research
   language TEXT,                 -- written language (nl, en, ...)
-  model TEXT, provider TEXT,
   prompt_version TEXT,           -- hash of the system prompt sent
-  ms INTEGER, tokens_in INTEGER, tokens_out INTEGER, cost REAL,
   status TEXT,                   -- ok | failed | timeout | cancelled | no_result | running
   reason TEXT,                   -- failure reason, no text
   delivered TEXT,                -- pasted | clipboard | none
@@ -132,27 +197,94 @@ CREATE TABLE IF NOT EXISTS calls(
   pi_session_id TEXT, pi_session_file TEXT,   -- research sessions only
   text_purged_at TEXT            -- set when retention wiped the text
 );
-CREATE INDEX IF NOT EXISTS calls_epoch ON calls(epoch);
-CREATE INDEX IF NOT EXISTS calls_pi_session ON calls(pi_session_id);
-CREATE VIRTUAL TABLE IF NOT EXISTS calls_fts USING fts5(context, input, output,
-  content=calls, content_rowid=id, tokenize='unicode61 remove_diacritics 2');
-CREATE TRIGGER IF NOT EXISTS calls_ai AFTER INSERT ON calls BEGIN
-  INSERT INTO calls_fts(rowid, context, input, output) VALUES (new.id, new.context, new.input, new.output);
+CREATE INDEX IF NOT EXISTS llm_content_epoch ON llm_content(epoch);
+CREATE INDEX IF NOT EXISTS llm_content_pi_session ON llm_content(pi_session_id);
+CREATE VIRTUAL TABLE IF NOT EXISTS llm_content_fts USING fts5(context, input, output,
+  content=llm_content, content_rowid=rowid, tokenize='unicode61 remove_diacritics 2');
+CREATE TRIGGER IF NOT EXISTS llm_content_ai AFTER INSERT ON llm_content BEGIN
+  INSERT INTO llm_content_fts(rowid, context, input, output) VALUES (new.rowid, new.context, new.input, new.output);
 END;
-CREATE TRIGGER IF NOT EXISTS calls_ad AFTER DELETE ON calls BEGIN
-  INSERT INTO calls_fts(calls_fts, rowid, context, input, output)
-    VALUES ('delete', old.id, old.context, old.input, old.output);
+CREATE TRIGGER IF NOT EXISTS llm_content_ad AFTER DELETE ON llm_content BEGIN
+  INSERT INTO llm_content_fts(llm_content_fts, rowid, context, input, output)
+    VALUES ('delete', old.rowid, old.context, old.input, old.output);
 END;
-CREATE TRIGGER IF NOT EXISTS calls_au AFTER UPDATE OF context, input, output ON calls BEGIN
-  INSERT INTO calls_fts(calls_fts, rowid, context, input, output)
-    VALUES ('delete', old.id, old.context, old.input, old.output);
-  INSERT INTO calls_fts(rowid, context, input, output) VALUES (new.id, new.context, new.input, new.output);
+CREATE TRIGGER IF NOT EXISTS llm_content_au AFTER UPDATE OF context, input, output ON llm_content BEGIN
+  INSERT INTO llm_content_fts(llm_content_fts, rowid, context, input, output)
+    VALUES ('delete', old.rowid, old.context, old.input, old.output);
+  INSERT INTO llm_content_fts(rowid, context, input, output) VALUES (new.rowid, new.context, new.input, new.output);
 END;
 """
+SCHEMA_SQL = CALL_SQL + CONTENT_SQL
 
-COLUMNS = ('ts', 'epoch', 'kind', 'mode', 'language', 'model', 'provider', 'prompt_version', 'ms',
-           'tokens_in', 'tokens_out', 'cost', 'status', 'reason', 'delivered', 'context', 'input',
-           'output', 'secrets_replaced', 'pi_session_id', 'pi_session_file')
+
+def _sha(text: Optional[str]) -> tuple[Optional[str], Optional[int]]:
+    if text is None:
+        return None, None
+    data = text.encode('utf-8')
+    return hashlib.sha256(data).hexdigest(), len(data)
+
+
+def _count(value: Any) -> Optional[int]:
+    return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else None
+
+
+def call_row(request_id: str, row: dict[str, Any], producer: str, traffic: str) -> Optional[tuple]:
+    """Flat llm-call/1 values for a direct call, or None (no attempt data, e.g. a research row).
+
+    Missing stays unknown: an absent counter or cost is NULL, never 0."""
+    attempt = row.get('call')
+    if not isinstance(attempt, dict):
+        return None
+    usage = attempt.get('usage') if isinstance(attempt.get('usage'), dict) else {}
+    prompt_details = usage.get('prompt_tokens_details') if isinstance(usage.get('prompt_tokens_details'), dict) else {}
+    completion_details = (usage.get('completion_tokens_details')
+                          if isinstance(usage.get('completion_tokens_details'), dict) else {})
+    prompt_tokens, completion_tokens = _count(usage.get('prompt_tokens')), _count(usage.get('completion_tokens'))
+    cost = usage.get('cost')
+    cost = float(cost) if isinstance(cost, (int, float)) and not isinstance(cost, bool) and cost >= 0 else None
+    reason = row.get('reason')
+    sent, received = bool(attempt.get('sent')), bool(attempt.get('received'))
+    http_status = attempt.get('http_status')
+    http_status = http_status if isinstance(http_status, int) and 100 <= http_status <= 599 else None
+    if not sent:
+        execution = 'error_before_send'
+    elif received and reason not in ('provider_error', 'invalid_response'):
+        execution = 'ok'      # the endpoint answered; a rejection by this application is no call error
+    else:
+        execution = 'error_after_send'
+    if cost is not None:
+        basis = 'provider'
+    elif not sent:
+        basis = 'not_sent'
+    elif reason == 'provider_error' or (http_status is not None and 400 <= http_status < 500):
+        basis = 'rejected'
+    else:
+        basis = 'unknown'
+    started = attempt.get('started')
+    started = float(started) if isinstance(started, (int, float)) else float(row['epoch'])
+    in_sha, in_bytes = _sha(attempt.get('request'))
+    out_sha, out_bytes = _sha(attempt.get('response'))
+    seconds = row.get('seconds')
+    def short(value: Any) -> Optional[str]:
+        return value[:200] if isinstance(value, str) and value and '\n' not in value else None
+    values = dict(
+        schema=CALL_SCHEMA, ts=_utc_iso(started), request_id=request_id,
+        response_id=short(attempt.get('response_id')), producer=producer, caller=row.get('caller') or 'dictation',
+        step=row.get('kind') or 'rewrite', traffic=row.get('traffic') or traffic,
+        session_id=short(row.get('pi_session_id')),
+        provider=short(row.get('provider')) or 'unknown',
+        model=short(attempt.get('model')) or short(row.get('model')) or 'unknown',
+        transport=short(attempt.get('transport')), execution_status=execution, http_status=http_status,
+        error=None if execution == 'ok' else short(reason) or 'unknown',
+        duration_s=float(seconds) if isinstance(seconds, (int, float)) and seconds >= 0 else None,
+        prompt_tokens=prompt_tokens, completion_tokens=completion_tokens,
+        cached_tokens=_count(prompt_details.get('cached_tokens')),
+        cache_write_tokens=_count(prompt_details.get('cache_write_tokens')),
+        reasoning_tokens=_count(completion_details.get('reasoning_tokens')),
+        usage_complete=int(prompt_tokens is not None and completion_tokens is not None),
+        cost_usd=cost, price_basis=basis, content_store='sqlite', content_key=request_id,
+        input_sha256=in_sha, input_bytes=in_bytes, output_sha256=out_sha, output_bytes=out_bytes)
+    return tuple(values.get(c) for c in CALL_COLUMNS)
 
 
 def _ensure_private_dir(path: str) -> None:
@@ -195,27 +327,37 @@ def purge(conn: sqlite3.Connection, text_days: int, meta_days: int,
     """Wipe text older than text_days, delete rows older than meta_days (0 = keep)."""
     now = time.time() if now is None else now
     stamp = _iso(now)
-    wiped = deleted = 0
+    wiped = deleted = calls_deleted = 0
     conn.execute('BEGIN IMMEDIATE')
     try:
         if meta_days > 0:
-            deleted = conn.execute('DELETE FROM calls WHERE epoch < ?', (now - meta_days * 86400,)).rowcount
+            cutoff = now - meta_days * 86400
+            deleted = conn.execute('DELETE FROM llm_content WHERE epoch < ?', (cutoff,)).rowcount
+            # Same UTC text form as written, so string order is time order.
+            calls_deleted = conn.execute('DELETE FROM llm_call WHERE ts < ?', (_utc_iso(cutoff),)).rowcount
         if text_days > 0:
+            # The llm_call row and its sha256 stay: proof that the call existed.
             wiped = conn.execute(
-                'UPDATE calls SET context=NULL, input=NULL, output=NULL, text_purged_at=? '
+                'UPDATE llm_content SET context=NULL, input=NULL, output=NULL, text_purged_at=? '
                 'WHERE epoch < ? AND text_purged_at IS NULL', (stamp, now - text_days * 86400)).rowcount
         conn.execute('COMMIT')
     except BaseException:
         conn.execute('ROLLBACK')
         raise
-    if wiped or deleted:
-        conn.execute("INSERT INTO calls_fts(calls_fts) VALUES ('optimize')")
+    if wiped or deleted or calls_deleted:
+        conn.execute("INSERT INTO llm_content_fts(llm_content_fts) VALUES ('optimize')")
         conn.execute('PRAGMA wal_checkpoint(TRUNCATE)')
-    return dict(text_wiped=wiped, rows_deleted=deleted)
+    return dict(text_wiped=wiped, rows_deleted=deleted, calls_deleted=calls_deleted)
 
 
 def _iso(epoch: float) -> str:
     return datetime.datetime.fromtimestamp(epoch).astimezone().isoformat(timespec='seconds')
+
+
+def _utc_iso(epoch: float) -> str:
+    """UTC with an explicit zone, one fixed form (llm-call/1 ts)."""
+    return datetime.datetime.fromtimestamp(epoch, datetime.timezone.utc).isoformat(
+        timespec='milliseconds').replace('+00:00', 'Z')
 
 
 def _shorten(text: str, max_chars: int) -> str:
@@ -231,8 +373,10 @@ class LlmLog:
     def __init__(self, path: str, text_days: int = 90, meta_days: int = 730, context_max_chars: int = 0,
                  diagnostic: Optional[Callable[..., None]] = None, queue_size: int = QUEUE_SIZE,
                  purge_interval_s: float = PURGE_INTERVAL_S, busy_timeout_ms: int = BUSY_TIMEOUT_MS,
-                 clock: Callable[[], float] = time.time):
+                 clock: Callable[[], float] = time.time, producer: str = 'DCT', traffic: str = 'real'):
         self.path = path
+        self.producer = producer
+        self.traffic = traffic
         self.text_days = text_days
         self.meta_days = meta_days
         self.context_max_chars = context_max_chars
@@ -311,9 +455,12 @@ class LlmLog:
             except sqlite3.Error:
                 pass
 
-    def _prepare(self, row: dict[str, Any]) -> tuple:
+    def _prepare(self, row: dict[str, Any]) -> tuple[Optional[tuple], tuple]:
         epoch = float(row.get('epoch') or self.clock())
         values = dict(row, epoch=epoch, ts=row.get('ts') or _iso(epoch))
+        values['request_id'] = values.get('request_id') or uuid.uuid4().hex
+        # Hashes and counters from the raw attempt, before any filtering.
+        call = call_row(values['request_id'], values, self.producer, self.traffic)
         system = values.pop('system_prompt', None)
         if system and not values.get('prompt_version'):
             values['prompt_version'] = prompt_version(system)
@@ -325,14 +472,24 @@ class LlmLog:
             replaced += n
         values['secrets_replaced'] = replaced
         self.counts['secrets_replaced'] += replaced
-        return tuple(values.get(column) for column in COLUMNS)
+        return call, tuple(values.get(column) for column in CONTENT_COLUMNS)
 
     def _write(self, row: dict[str, Any]) -> None:
         try:
-            values = self._prepare(row)
+            call, content = self._prepare(row)
             conn = self._connection()
-            conn.execute('INSERT INTO calls(%s) VALUES (%s)' % (', '.join(COLUMNS), ', '.join('?' * len(COLUMNS))),
-                         values)
+            conn.execute('BEGIN IMMEDIATE')
+            try:
+                if call is not None:
+                    conn.execute('INSERT INTO llm_call(%s) VALUES (%s)'
+                                 % (', '.join(CALL_COLUMNS), ', '.join('?' * len(CALL_COLUMNS))), call)
+                conn.execute('INSERT INTO llm_content(%s) VALUES (%s)'
+                             % (', '.join(CONTENT_COLUMNS), ', '.join('?' * len(CONTENT_COLUMNS))), content)
+                conn.execute('COMMIT')
+            except BaseException:
+                if conn.in_transaction:
+                    conn.execute('ROLLBACK')
+                raise
         except sqlite3.OperationalError as exc:
             self._dropped('locked' if 'locked' in str(exc) or 'busy' in str(exc) else 'write_error',
                           error=type(exc).__name__)
@@ -394,7 +551,7 @@ def from_settings(loaded, diagnostic: Optional[Callable[..., None]] = None, envi
         return None
     log = LlmLog(resolve_path(loaded.get('log.path'), environ), text_days=loaded.get('log.text_days'),
                  meta_days=loaded.get('log.meta_days'), context_max_chars=loaded.get('log.context_max_chars'),
-                 diagnostic=diagnostic)
+                 diagnostic=diagnostic, producer=loaded.get('log.producer'))
     if diagnostic:
         diagnostic('llm_log_on', text_days=log.text_days, meta_days=log.meta_days,
                    context_max_chars=log.context_max_chars)

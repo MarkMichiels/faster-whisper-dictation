@@ -151,6 +151,8 @@ SCHEMA: tuple[Setting, ...] = (
     _s('rewrite.context.badge', 'bool', True, 'Show a small corner badge when context was taken (length only).'),
     _s('log.enabled', 'bool', False, 'Keep a local, searchable log of every LLM call with its text '
        '(docs/llm_log.md). The secret filter and the password-window skip always apply.'),
+    _s('log.producer', 'str', 'DCT', 'Producer code written in every llm-call/1 record: 2-6 capitals or digits, '
+       'starting with a letter.'),
     _s('log.path', 'str?', None, 'Log database; null = $XDG_DATA_HOME/faster-whisper-dictation/llm_log.db.'),
     _s('log.text_days', 'int', 90, 'Days the text (context, dictation, answer) is kept; then wiped, '
        'metadata stays; 0 = keep text.', low=0, high=36_500),

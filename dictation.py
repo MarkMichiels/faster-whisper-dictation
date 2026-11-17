@@ -2586,12 +2586,10 @@ class App():
         try:
             window_class = getattr(self.replayer, 'last_window_class', '')
             status = 'ok' if result.ok else 'timeout' if result.reason == 'timeout' else 'failed'
-            seconds = meta.get('seconds')
             log.record(kind='rewrite', mode='regel' if getattr(session, 'terminal_mode', False) else 'opmaak',
                        language=language or meta.get('language'), model=meta.get('model'),
                        provider=meta.get('provider'), system_prompt=getattr(result, 'system_prompt', None),
-                       ms=round(seconds * 1000) if isinstance(seconds, (int, float)) else None,
-                       tokens_in=meta.get('tokens_in'), tokens_out=meta.get('tokens_out'), cost=meta.get('cost'),
+                       seconds=meta.get('seconds'), call=getattr(result, 'call', None),
                        status=status, reason=None if result.ok else result.reason,
                        delivered='pasted' if (delivery or {}).get('ok') else 'none',
                        context=session.context, input=raw, output=getattr(result, 'answer', None),
