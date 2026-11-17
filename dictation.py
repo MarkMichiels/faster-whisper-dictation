@@ -533,8 +533,9 @@ class StreamingRecorder:
         # Inspect the opened PortAudio default, then resolve the live PipeWire
         # stream asynchronously: pw-dump must never stall audio reads.
         from capture_metadata import log_capture_device, log_pipewire_capture
-        log_capture_device(p, self.SAMPLE_RATE)
-        threading.Thread(target=log_pipewire_capture, daemon=True).start()
+        capture_id = self._input_observation.capture_id
+        log_capture_device(p, self.SAMPLE_RATE, capture_id)
+        threading.Thread(target=log_pipewire_capture, args=(capture_id,), daemon=True).start()
 
         if self.ledger:
             latency = time.time() - self.ledger.started

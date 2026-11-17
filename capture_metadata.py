@@ -2,6 +2,7 @@
 import json
 import os
 import subprocess
+import uuid
 
 from coverage_ledger import RATE, audio_stats, diagnostic
 
@@ -43,25 +44,26 @@ def pipewire_capture(pid, objects):
                 routes=routes, physical_route_proven=False)
 
 
-def log_pipewire_capture():
+def log_pipewire_capture(capture_id=None):
     try:
         result = subprocess.run(['pw-dump'], capture_output=True, text=True,
                                 timeout=1, check=True)
-        emit('capture_pipewire', **pipewire_capture(os.getpid(), json.loads(result.stdout)))
+        emit('capture_pipewire', capture_id=capture_id,
+             **pipewire_capture(os.getpid(), json.loads(result.stdout)))
     except Exception as exc:
-        emit('capture_pipewire', status='unavailable', error_type=type(exc).__name__)
+        emit('capture_pipewire', capture_id=capture_id, status='unavailable', error_type=type(exc).__name__)
 
 
-def log_capture_device(pa, rate):
+def log_capture_device(pa, rate, capture_id=None):
     try:
         device = pa.get_default_input_device_info()
         host = pa.get_host_api_info_by_index(int(device['hostApi']))
-        emit('capture_device', index=device.get('index'), name=device.get('name'),
+        emit('capture_device', capture_id=capture_id, index=device.get('index'), name=device.get('name'),
              host_api=host.get('name'), default_samplerate=device.get('defaultSampleRate'),
              requested_rate=rate, requested_channels=1, selection='portaudio_default',
              physical_route_proven=False)
     except Exception as exc:
-        emit('capture_device', status='unavailable', error_type=type(exc).__name__)
+        emit('capture_device', capture_id=capture_id, status='unavailable', error_type=type(exc).__name__)
 
 
 class InputObservation:
@@ -72,6 +74,7 @@ class InputObservation:
     voiced_s in audio_stats is likewise energy-based, not Silero speech duration.
     """
     def __init__(self):
+        self.capture_id = uuid.uuid4().hex
         self.last_log_end = None
         self.last_end = None
         self.weak_start = None
@@ -87,7 +90,7 @@ class InputObservation:
                 if self.weak_start is None or (self.last_end is not None and start > self.last_end):
                     self.weak_start = start
                 if end - self.weak_start >= 3 * RATE and not self.warned:
-                    emit('input_level_warning', reason='sustained_low_input',
+                    emit('input_level_warning', capture_id=self.capture_id, reason='sustained_low_input',
                          message='Microfoonsignaal langdurig erg zwak; controleer microfoon en bron.',
                          start=self.weak_start, end=end, weak_seconds=(end-self.weak_start)/RATE,
                          rms_threshold_dbfs=-45, audio=stats)
@@ -96,7 +99,7 @@ class InputObservation:
                 self.weak_start = None
             self.last_end = end
         if stop or self.last_log_end is None or end - self.last_log_end >= RATE:
-            emit('vad_observation', buffer_start=offset, buffer_end=end,
+            emit('vad_observation', capture_id=self.capture_id, buffer_start=offset, buffer_end=end,
                  processed_end=offset + processed,
                  last_speech_end=offset + timestamps[-1]['end'] if timestamps else None,
                  vad_speech_seconds=sum(t['end']-t['start'] for t in timestamps)/RATE,

@@ -46,7 +46,7 @@ class ObservationTests(unittest.TestCase):
                 self.assertAlmostEqual(row['audio']['peak_dbfs'], db+3, delta=.1)
                 self.assertAlmostEqual(row['audio']['voiced_s'], voiced, delta=.01)
                 self.assertIsNone(row['last_speech_end'])
-                self.assertEqual(set(row), {'timestamp', 'kind', 'buffer_start', 'buffer_end',
+                self.assertEqual(set(row), {'timestamp', 'kind', 'capture_id', 'buffer_start', 'buffer_end',
                     'processed_end', 'last_speech_end', 'vad_speech_seconds',
                     'trailing_silence_seconds', 'threshold', 'auto_stop_silence_s',
                     'stop', 'window_start', 'window_end', 'audio'})
@@ -93,6 +93,7 @@ class ObservationTests(unittest.TestCase):
         with patch.object(threading, 'Thread'):
             obj.start()
         self.assertIsNot(old, obj._input_observation)
+        self.assertNotEqual(old.capture_id, obj._input_observation.capture_id)
         self.assertFalse(obj._input_observation.warned)
         self.assertIsNone(obj._input_observation.last_log_end)
 
@@ -175,7 +176,7 @@ class CaptureSourceTests(unittest.TestCase):
         self.assertEqual(run.call_args.kwargs['timeout'], 1)
         self.assertEqual(run.call_args.args[0], ['pw-dump'])
         row = entries(out)[0]
-        self.assertEqual(set(row), {'timestamp', 'kind', 'status', 'routes', 'physical_route_proven'})
+        self.assertEqual(set(row), {'timestamp', 'kind', 'capture_id', 'status', 'routes', 'physical_route_proven'})
         self.assertEqual(row['routes'], [])
 
     def test_portaudio_and_missing_pipewire_are_nonfatal(self):
