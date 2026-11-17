@@ -118,6 +118,48 @@ class KeyTests(unittest.TestCase):
         self.assertEqual(calls[-1][:2], ('nl', False))
 
 
+class StartupTests(unittest.TestCase):
+    def test_node_alias_selects_target_for_pi_shebang(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            runtime = root / 'runtime'
+            aliases = root / 'aliases'
+            runtime.mkdir()
+            aliases.mkdir()
+            node = runtime / 'node'
+            node.write_text('#!/bin/sh\nprintf "selected-runtime\\n"\n')
+            node.chmod(0o755)
+            alias = aliases / 'dictation-node'
+            alias.symlink_to(node)
+            pi = root / 'pi'
+            pi.write_text('#!/usr/bin/env node\n')
+            pi.chmod(0o755)
+            cfg = research.ResearchConfig(str(pi), 'anthropic/test', 'medium', tmp,
+                                          str(root / 'notes'), 10, node_bin=str(alias))
+            base = {'PATH': '/usr/bin:/bin'}
+            env = research.environment(cfg, base)
+            self.assertEqual(shutil.which('node', path=env['PATH']), str(node))
+            self.assertEqual(subprocess.check_output([str(pi)], env=env, text=True),
+                             'selected-runtime\n')
+            self.assertEqual(base, {'PATH': '/usr/bin:/bin'})
+            cfg = research.ResearchConfig(str(pi), 'anthropic/test', 'medium', tmp,
+                                          str(root / 'notes'), 10, node_bin=str(node))
+            self.assertEqual(research.environment(cfg, base)['PATH'], env['PATH'])
+            cfg = research.ResearchConfig(str(pi), 'anthropic/test', 'medium', tmp,
+                                          str(root / 'notes'), 10)
+            self.assertEqual(research.environment(cfg, base)['PATH'], base['PATH'])
+
+    def test_runtime_reason_contains_no_stderr_values(self):
+        for module, symbol in (('module', 'enableCompileCache'), ('util', 'styleText')):
+            stderr = ("SyntaxError: The requested module 'node:%s' does not provide "
+                      "an export named '%s'\nNode.js v18.19.1\nprivate payload" % (module, symbol))
+            self.assertEqual(research._stderr_reason(stderr.encode(), 1),
+                             'node_runtime_incompatible')
+        self.assertEqual(research._stderr_reason(b'unrelated private payload', 1), 'pi_exit_1')
+        self.assertEqual(research._stderr_reason(b'Unknown model', 1), 'model_unknown')
+        self.assertEqual(research._stderr_reason(b'No API key', 1), 'auth')
+
+
 class SettingsTests(unittest.TestCase):
     def load(self, text):
         with tempfile.TemporaryDirectory() as tmp:

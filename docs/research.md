@@ -40,7 +40,7 @@ All keys live under `research.` in `config.yaml`; the generated reference is in
 |---|---|
 | `research.enabled` | `true` to turn the mode on |
 | `research.pi_bin` | absolute path of the `pi` executable |
-| `research.node_bin` | absolute path of `node` when the service's PATH lacks it (for example with nvm) |
+| `research.node_bin` | absolute path of `node` when the service's PATH lacks it (for example with nvm); symlinks such as `dictation-node` are resolved before prepending the target directory to PATH |
 | `research.cwd` | working directory of the session; its `AGENTS.md` and skills apply |
 | `research.model` | `provider/id`; only `anthropic`, `openai-codex` and `openrouter` are accepted, anything else is refused at load time |
 | `research.thinking` | Pi thinking level (default `medium`) |

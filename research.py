@@ -153,7 +153,10 @@ def environment(cfg: ResearchConfig, base: Optional[dict] = None) -> dict:
     env = dict(os.environ if base is None else base)
     path = env.get('PATH', '/usr/bin:/bin')
     if cfg.node_bin:
-        path = os.path.dirname(cfg.node_bin) + os.pathsep + path
+        # A stable alias (e.g. dictation-node -> nvm/.../bin/node) may
+        # have a different basename. Pi's /usr/bin/env node shebang needs
+        # the target directory, not the alias directory.
+        path = os.path.dirname(os.path.realpath(cfg.node_bin)) + os.pathsep + path
     env['PATH'] = path
     env['DICTATION_RESEARCH_CWD'] = cfg.cwd
     env['DICTATION_RESEARCH_NOTES'] = cfg.notes_dir
@@ -481,6 +484,9 @@ def _rule_code(text: str) -> str:
 def _stderr_reason(tail: bytes, returncode: int) -> str:
     """A reason code from Pi's stderr; the text itself is never journalled."""
     text = tail.decode('utf-8', 'replace').lower()
+    if ("syntaxerror: the requested module 'node:module' does not provide an export named 'enablecompilecache'" in text
+            or "syntaxerror: the requested module 'node:util' does not provide an export named 'styletext'" in text):
+        return 'node_runtime_incompatible'
     if 'no api key' in text or 'not logged in' in text or 'unauthorized' in text or 'login' in text:
         return 'auth'
     if 'model' in text and ('not found' in text or 'unknown' in text):
