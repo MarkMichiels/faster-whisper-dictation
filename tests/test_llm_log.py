@@ -39,6 +39,18 @@ def wait_for(predicate, timeout=5.0):
     return False
 
 
+def fake_call(**over):
+    """A RewriteResult.call as an OpenRouter-like endpoint would leave it (made-up values)."""
+    call = dict(started=time.time(), sent=True, received=True, http_status=200, response_id=None,
+                model='fake/served', transport='openrouter',
+                usage={'prompt_tokens': 120, 'completion_tokens': 30, 'cost': 0.00012,
+                       'prompt_tokens_details': {'cached_tokens': 100},
+                       'completion_tokens_details': {'reasoning_tokens': 0}},
+                request='[{"role": "user", "content": "verzonnen"}]', response='{"tekst": "verzonnen"}')
+    call.update(over)
+    return call
+
+
 class Base(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -60,7 +72,7 @@ class Base(unittest.TestCase):
         self.logs.append(log)
         return log
 
-    def rows(self, sql='SELECT * FROM calls ORDER BY id', args=()):
+    def rows(self, sql='SELECT * FROM llm_content ORDER BY rowid', args=()):
         conn = sqlite3.connect(self.path)
         conn.row_factory = sqlite3.Row
         try:
@@ -134,9 +146,9 @@ class WriterTest(Base):
         self.assertEqual(row['secrets_replaced'], 1)
         self.assertEqual(row['prompt_version'], llm_log.prompt_version('Opdracht: verzonnen'))
         self.assertIsNone(row['text_purged_at'])
-        hits = self.rows("SELECT rowid FROM calls_fts WHERE calls_fts MATCH 'offerte'")
+        hits = self.rows("SELECT rowid FROM llm_content_fts WHERE llm_content_fts MATCH 'offerte'")
         self.assertEqual(len(hits), 1)
-        self.assertFalse(self.rows("SELECT rowid FROM calls_fts WHERE calls_fts MATCH 'abcdefgh12345678'"))
+        self.assertFalse(self.rows("SELECT rowid FROM llm_content_fts WHERE llm_content_fts MATCH 'abcdefgh12345678'"))
         # The journal never carries text.
         self.assertFalse(any('offerte' in repr(d) for _, d in self.events))
 
@@ -182,17 +194,18 @@ class WriterTest(Base):
 class RetentionTest(Base):
     def test_text_wiped_metadata_kept_fts_clean_file_clean(self):
         now = time.time()
-        conn = llm_log.connect(self.path)
-        cols = ', '.join(llm_log.COLUMNS)
+        log = self.make(clock=lambda: now)
         for age, word in ((100, 'zeppelinoud'), (800, 'zeppelinoeroud'), (5, 'zeppelinnieuw')):
             epoch = now - age * DAY
-            conn.execute('INSERT INTO calls(%s) VALUES (%s)' % (cols, ', '.join('?' * len(llm_log.COLUMNS))),
-                         (llm_log._iso(epoch), epoch, 'rewrite', 'opmaak', 'nl', 'm', 'p', 'v', 10, 1, 1,
-                          0.0, 'ok', None, 'pasted', 'context ' + word, 'input ' + word, 'output ' + word,
-                          0, None, None))
+            log._write(dict(kind='rewrite', model='m', provider='p', seconds=0.01, status='ok', epoch=epoch,
+                            context='context ' + word, input='input ' + word, output='output ' + word,
+                            call=fake_call(started=epoch)))
+        self.assertEqual(log.counts['written'], 3)
+        log._reset_connection()
+        conn = llm_log.connect(self.path)
         result = llm_log.purge(conn, 90, 730, now)
         conn.close()
-        self.assertEqual(result, dict(text_wiped=1, rows_deleted=1))
+        self.assertEqual(result, dict(text_wiped=1, rows_deleted=1, calls_deleted=1))
         rows = self.rows()
         self.assertEqual(len(rows), 2)
         old, new = rows
@@ -200,11 +213,17 @@ class RetentionTest(Base):
         self.assertIsNone(old['context'])
         self.assertIsNone(old['output'])
         self.assertIsNotNone(old['text_purged_at'])
-        self.assertEqual((old['model'], old['ms'], old['status']), ('m', 10, 'ok'))
+        self.assertEqual(old['status'], 'ok')
         self.assertEqual(new['input'], 'input zeppelinnieuw')
+        # The content-free call record and its hashes stay after the text is wiped.
+        calls = self.rows('SELECT * FROM llm_call ORDER BY ts')
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(calls[0]['request_id'], old['request_id'])
+        self.assertEqual((calls[0]['model'], calls[0]['duration_s']), ('fake/served', 0.01))
+        self.assertRegex(calls[0]['input_sha256'], '^[0-9a-f]{64}$')
         for word, hits in (('zeppelinoud', 0), ('zeppelinoeroud', 0), ('zeppelinnieuw', 1)):
-            self.assertEqual(len(self.rows('SELECT rowid FROM calls_fts WHERE calls_fts MATCH ?', (word,))),
-                             hits, word)
+            self.assertEqual(len(self.rows('SELECT rowid FROM llm_content_fts WHERE llm_content_fts MATCH ?',
+                                           (word,))), hits, word)
         # secure_delete + optimize + checkpoint: the wiped words are gone from every file.
         for name in os.listdir(self.dir):
             with open(os.path.join(self.dir, name), 'rb') as fh:
@@ -213,8 +232,9 @@ class RetentionTest(Base):
             self.assertNotIn(b'zeppelinoeroud', data, name)
         # Idempotent.
         conn = llm_log.connect(self.path)
-        self.assertEqual(llm_log.purge(conn, 90, 730, now), dict(text_wiped=0, rows_deleted=0))
-        self.assertEqual(llm_log.purge(conn, 0, 0, now + 9999 * DAY), dict(text_wiped=0, rows_deleted=0))
+        none = dict(text_wiped=0, rows_deleted=0, calls_deleted=0)
+        self.assertEqual(llm_log.purge(conn, 90, 730, now), none)
+        self.assertEqual(llm_log.purge(conn, 0, 0, now + 9999 * DAY), none)
         conn.close()
 
     def test_writer_runs_purge_at_start_and_then_daily(self):
@@ -276,12 +296,94 @@ class NeverBlocksTest(Base):
         self.assertTrue(wait_for(lambda: log.counts['dropped'] == 1, 5))
 
 
+class CallRecordTest(Base):
+    """llm-call/1 mapping: content-free, missing stays unknown (NULL), never 0."""
+
+    def record(self, **row):
+        values = llm_log.call_row('r1', dict(dict(kind='rewrite', provider='prov', model='m', seconds=1.5,
+                                                  epoch=time.time()), **row), 'DCT', 'real')
+        return dict(zip(llm_log.CALL_COLUMNS, values))
+
+    def test_table_has_exactly_the_contract_columns(self):
+        conn = llm_log.connect(self.path)
+        columns = [r[1] for r in conn.execute('PRAGMA table_info(llm_call)')]
+        conn.close()
+        self.assertEqual(sorted(columns), sorted(llm_log.CALL_COLUMNS))
+        self.assertEqual(len(llm_log.CALL_COLUMNS), 36)
+        for banned in ('context', 'input', 'output', 'text', 'prompt', 'messages', 'content'):
+            self.assertNotIn(banned, columns)
+
+    def test_success_with_provider_cost(self):
+        r = self.record(call=fake_call(response_id='gen-123'))
+        self.assertEqual((r['schema'], r['producer'], r['caller'], r['step'], r['traffic']),
+                         ('llm-call/1', 'DCT', 'dictation', 'rewrite', 'real'))
+        self.assertTrue(r['ts'].endswith('Z'))
+        self.assertEqual((r['execution_status'], r['http_status'], r['error']), ('ok', 200, None))
+        self.assertEqual((r['provider'], r['model'], r['transport'], r['response_id']),
+                         ('prov', 'fake/served', 'openrouter', 'gen-123'))
+        self.assertEqual((r['prompt_tokens'], r['completion_tokens'], r['cached_tokens'], r['reasoning_tokens'],
+                          r['cache_write_tokens']), (120, 30, 100, 0, None))
+        self.assertEqual((r['usage_complete'], r['cost_usd'], r['price_basis']), (1, 0.00012, 'provider'))
+        self.assertEqual((r['content_store'], r['content_key']), ('sqlite', 'r1'))
+        import hashlib
+        self.assertEqual(r['input_sha256'], hashlib.sha256(fake_call()['request'].encode()).hexdigest())
+        self.assertEqual(r['output_bytes'], len(fake_call()['response'].encode()))
+        self.assertEqual(r['duration_s'], 1.5)
+
+    def test_rejected_answer_is_still_an_executed_call(self):
+        r = self.record(reason='answer_too_long', call=fake_call())
+        self.assertEqual((r['execution_status'], r['error']), ('ok', None))
+
+    def test_http_error_is_rejected_after_send(self):
+        r = self.record(reason='http_429', call=fake_call(received=False, http_status=429, usage=None,
+                                                          model=None, response=None))
+        self.assertEqual((r['execution_status'], r['http_status'], r['error'], r['price_basis']),
+                         ('error_after_send', 429, 'http_429', 'rejected'))
+        self.assertEqual((r['cost_usd'], r['usage_complete'], r['prompt_tokens']), (None, 0, None))
+        self.assertEqual(r['model'], 'm')          # the configured id when the provider reported none
+        self.assertIsNone(r['output_sha256'])
+        self.assertIsNone(r['output_bytes'])
+
+    def test_timeout_cost_unknown(self):
+        r = self.record(reason='timeout', call=fake_call(received=False, http_status=None, usage=None,
+                                                         response=None))
+        self.assertEqual((r['execution_status'], r['price_basis'], r['cost_usd'], r['http_status']),
+                         ('error_after_send', 'unknown', None, None))
+
+    def test_not_sent(self):
+        r = self.record(reason='key_unreadable', provider=None,
+                        call=fake_call(sent=False, received=False, http_status=None, usage=None, model=None,
+                                       response=None))
+        self.assertEqual((r['execution_status'], r['price_basis'], r['provider'], r['error']),
+                         ('error_before_send', 'not_sent', 'unknown', 'key_unreadable'))
+
+    def test_usage_without_cost_or_completion(self):
+        r = self.record(call=fake_call(usage={'prompt_tokens': 10}))
+        self.assertEqual((r['prompt_tokens'], r['completion_tokens'], r['usage_complete'], r['cost_usd'],
+                          r['price_basis']), (10, None, 0, None, 'unknown'))
+
+    def test_research_row_has_no_call_record(self):
+        self.assertIsNone(llm_log.call_row('r2', dict(kind='research', epoch=time.time()), 'DCT', 'real'))
+        log = self.make()
+        log._write(dict(kind='research', status='running', pi_session_id='s-1', input='verzonnen vraag'))
+        self.assertEqual(len(self.rows()), 1)
+        self.assertEqual(self.rows('SELECT * FROM llm_call'), [])
+
+    def test_duplicate_response_id_drops_the_row(self):
+        log = self.make()
+        log._write(dict(kind='rewrite', input='een', call=fake_call(response_id='gen-dup')))
+        log._write(dict(kind='rewrite', input='twee', call=fake_call(response_id='gen-dup')))
+        self.assertEqual((log.counts['written'], log.counts['dropped']), (1, 1))
+        self.assertEqual([r['input'] for r in self.rows()], ['een'])   # both tables or neither
+
+
 class SettingsTest(unittest.TestCase):
     def test_defaults_and_yaml(self):
         loaded = settings.load({'XDG_CONFIG_HOME': '/nonexistent'})
         self.assertEqual([loaded.get(k) for k in ('log.enabled', 'log.path', 'log.text_days', 'log.meta_days',
                                                   'log.context_max_chars')], [False, None, 90, 730, 0])
         self.assertIsNone(llm_log.from_settings(loaded))
+        self.assertEqual(loaded.get('log.producer'), 'DCT')
         with tempfile.TemporaryDirectory() as tmp:
             cfg = os.path.join(tmp, 'config.yaml')
             db = os.path.join(tmp, 'd', 'log.db')
@@ -291,8 +393,8 @@ class SettingsTest(unittest.TestCase):
             loaded = settings.load({}, cfg)
             log = llm_log.from_settings(loaded)
             try:
-                self.assertEqual((log.path, log.text_days, log.meta_days, log.context_max_chars),
-                                 (db, 30, 0, 2000))
+                self.assertEqual((log.path, log.text_days, log.meta_days, log.context_max_chars, log.producer),
+                                 (db, 30, 0, 2000, 'DCT'))
             finally:
                 log.close()
             with open(cfg, 'w') as fh:
@@ -337,6 +439,12 @@ class RewriteHookTest(unittest.TestCase):
                          ('fake/model', 'fakeprov', 11))
         self.assertIn('beknopt', result.system_prompt)
         self.assertEqual(len(llm_log.prompt_version(result.system_prompt)), 12)
+        self.assertEqual((result.call['sent'], result.call['received'], result.call['http_status'],
+                          result.call['transport'], result.call['usage']['prompt_tokens']),
+                         (True, True, 200, 'llm.invalid', 11))
+        self.assertIn('vergadering', result.call['request'])
+        self.assertEqual(rewrite.transport('https://openrouter.ai/api/v1/chat/completions'), 'openrouter')
+        self.assertEqual(rewrite.transport('https://api.openai.com/v1/chat/completions'), 'openai')
         self.assertNotIn('vergadering', out.getvalue())
         with contextlib.redirect_stdout(io.StringIO()):
             none = rewrite.rewrite('x', 'nl', None, None, 'not_configured')
@@ -364,10 +472,10 @@ class RewriteHookTest(unittest.TestCase):
             app._deliver_rewrite(session, 'ruw dictaat', [])
         self.assertEqual(order, ['paste', 'log'])
         row = app.llm_log.record.call_args.kwargs
-        self.assertEqual((row['kind'], row['mode'], row['ms'], row['status'], row['delivered'], row['input'],
+        self.assertEqual((row['kind'], row['mode'], row['seconds'], row['status'], row['delivered'], row['input'],
                           row['context'], row['output'], row['window_class'], row['password_field'],
                           row['system_prompt']),
-                         ('rewrite', 'opmaak', 1234, 'ok', 'pasted', 'ruw dictaat', 'Beste Jan', 'Klaar.',
+                         ('rewrite', 'opmaak', 1.234, 'ok', 'pasted', 'ruw dictaat', 'Beste Jan', 'Klaar.',
                           'org.gnome.texteditor', False, 'Opdracht: verzonnen prompt'))
         # A log that raises never breaks delivery.
         app.llm_log.record.side_effect = RuntimeError('boom')

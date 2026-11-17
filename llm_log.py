@@ -57,6 +57,7 @@ PURGE_INTERVAL_S = 24 * 3600
 SECRET_MARK = '[geheim]'
 TEXT_COLUMNS = ('context', 'input', 'output')
 SCHEMA_VERSION = 1
+PRODUCER_RE = re.compile(r'[A-Z][A-Z0-9]{1,5}')   # llm-call/1 producer: a project prefix
 
 # Window classes (lowercased substrings) of password managers and secret prompts.
 PASSWORD_WINDOW_HINTS = ('keepass', 'bitwarden', '1password', 'lastpass', 'enpass', 'keeweb',
@@ -549,9 +550,13 @@ def from_settings(loaded, diagnostic: Optional[Callable[..., None]] = None, envi
     if not loaded.get('log.enabled'):
         diagnostic and diagnostic('llm_log_off')
         return None
+    producer = loaded.get('log.producer')
+    if not PRODUCER_RE.fullmatch(producer or ''):
+        diagnostic and diagnostic('config_invalid', key='log.producer', reason='not_a_producer_code')
+        producer = 'DCT'
     log = LlmLog(resolve_path(loaded.get('log.path'), environ), text_days=loaded.get('log.text_days'),
                  meta_days=loaded.get('log.meta_days'), context_max_chars=loaded.get('log.context_max_chars'),
-                 diagnostic=diagnostic, producer=loaded.get('log.producer'))
+                 diagnostic=diagnostic, producer=producer)
     if diagnostic:
         diagnostic('llm_log_on', text_days=log.text_days, meta_days=log.meta_days,
                    context_max_chars=log.context_max_chars)

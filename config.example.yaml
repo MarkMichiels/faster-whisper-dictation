@@ -74,6 +74,7 @@ rewrite:
 
 log:
   # enabled: false    # Keep a local, searchable log of every LLM call with its text (docs/llm_log.md). The secret filter and the password-window skip always apply.
+  # producer: DCT    # Producer code written in every llm-call/1 record: 2-6 capitals or digits, starting with a letter.
   # path: null    # Log database; null = $XDG_DATA_HOME/faster-whisper-dictation/llm_log.db.
   # text_days: 90    # Days the text (context, dictation, answer) is kept; then wiped, metadata stays; 0 = keep text.
   # meta_days: 730    # Days a row (time, model, duration, cost, status) is kept; 0 = keep.

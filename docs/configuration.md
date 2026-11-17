@@ -142,6 +142,7 @@ table and `config.example.yaml` in step with the code.
 | `rewrite.context.release_selection` | bool | `true` |  |  |  | After a Ctrl+A selection was taken as context, send one Ctrl+Home once the start keys are released. |
 | `rewrite.context.badge` | bool | `true` |  |  |  | Show a small corner badge when context was taken (length only). |
 | `log.enabled` | bool | `false` |  |  |  | Keep a local, searchable log of every LLM call with its text (docs/llm_log.md). The secret filter and the password-window skip always apply. |
+| `log.producer` | string | `DCT` |  |  |  | Producer code written in every llm-call/1 record: 2-6 capitals or digits, starting with a letter. |
 | `log.path` | string or null | `null` |  |  |  | Log database; null = $XDG_DATA_HOME/faster-whisper-dictation/llm_log.db. |
 | `log.text_days` | int | `90` | 0–36500 |  |  | Days the text (context, dictation, answer) is kept; then wiped, metadata stays; 0 = keep text. |
 | `log.meta_days` | int | `730` | 0–36500 |  |  | Days a row (time, model, duration, cost, status) is kept; 0 = keep. |
