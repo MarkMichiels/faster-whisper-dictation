@@ -488,6 +488,8 @@ class StreamingRecorder:
         self._raw_frames = []
         self._vad_processed_samples = 0
         self._buffer_offset = 0
+        from capture_metadata import InputObservation
+        self._input_observation = InputObservation()
 
         self._rec_thread = threading.Thread(target=self._record_loop, daemon=True)
         self._vad_thread = threading.Thread(target=self._vad_loop, daemon=True)
@@ -527,6 +529,12 @@ class StreamingRecorder:
                 self.ledger.incident('capture_open_error', error=str(exc))
             threading.Thread(target=self.on_auto_stop, daemon=True).start()
             return
+
+        # Inspect the opened PortAudio default, then resolve the live PipeWire
+        # stream asynchronously: pw-dump must never stall audio reads.
+        from capture_metadata import log_capture_device, log_pipewire_capture
+        log_capture_device(p, self.SAMPLE_RATE)
+        threading.Thread(target=log_pipewire_capture, daemon=True).start()
 
         if self.ledger:
             latency = time.time() - self.ledger.started
@@ -617,9 +625,22 @@ class StreamingRecorder:
             # No speech detected at all — entire buffer is silence
             trailing_silence_s = audio_duration_s
 
+        # Content-free observation before the unchanged auto-stop decision.
+        stop = (self.auto_stop_silence_s and self.on_auto_stop
+                and trailing_silence_s > self.auto_stop_silence_s)
+        try:
+            from capture_metadata import InputObservation
+            if not hasattr(self, '_input_observation'):
+                self._input_observation = InputObservation()
+            self._input_observation.observe(
+                audio, getattr(self, '_buffer_offset', 0), self._vad_processed_samples,
+                timestamps, trailing_silence_s, self.vad_options.threshold,
+                self.auto_stop_silence_s, stop)
+        except Exception:
+            pass  # diagnostics must not change delivery or the stop decision
+
         # Auto-stop if trailing silence exceeds threshold
-        if (self.auto_stop_silence_s and self.on_auto_stop
-                and trailing_silence_s > self.auto_stop_silence_s):
+        if stop:
             print('[VAD] %.0fs trailing silence — auto-stopping' % trailing_silence_s)
             # Fire callback in separate thread to avoid deadlock
             # (App._auto_stop() joins the VAD thread, which is us)
