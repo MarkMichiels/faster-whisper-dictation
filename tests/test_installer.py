@@ -65,13 +65,25 @@ class InstallerTests(unittest.TestCase):
 [[ "$1 $2" == '-m venv' ]]
 venv="$3"
 mkdir -p "$venv/bin"
-printf '#!/bin/bash\\nprintf "%%s\\n" "%s/lib/python3.13/site-packages"\\n' "$venv" > "$venv/bin/python3"
+cat > "$venv/bin/python3" <<'PYTHON'
+#!/bin/bash
+set -euo pipefail
+venv="$(dirname "$0")/.."
+if [[ "${1:-}" == */requirements_check.py ]]; then
+    [[ -e "$venv/satisfied" ]]
+elif [[ "${1:-} ${2:-}" == '-m pip' ]]; then
+    "$venv/bin/pip"
+else
+    printf '%s/lib/python3.13/site-packages\\n' "$(cd "$venv" && pwd)"
+fi
+PYTHON
 chmod +x "$venv/bin/python3"
 printf 'export PATH="%s/bin:$PATH"\\n' "$venv" > "$venv/bin/activate"
 cat > "$venv/bin/pip" <<'PIP'
 #!/bin/bash
 set -euo pipefail
 echo pip >> "$CALL_LOG"
+touch "$(dirname "$0")/../satisfied"
 site="$(dirname "$0")/../lib/python3.13/site-packages"
 mkdir -p "$site/nvidia/cudnn/lib" "$site/nvidia/cublas/lib"
 PIP
@@ -87,7 +99,7 @@ if [[ "$*" == *enable* ]]; then
 fi
 ''')
             env = dict(os.environ, HOME=str(root / "home"), CALL_LOG=str(log),
-                       PATH=f"{commands}:/usr/bin:/bin")
+                       PATH=f"{commands}:/usr/bin:/bin", XDG_SESSION_TYPE="x11")
             # --check without a venv is a normal negative, with a useful reason.
             checked = subprocess.run(["bash", str(script), "--check"], env=env,
                                      capture_output=True, text=True, timeout=15)

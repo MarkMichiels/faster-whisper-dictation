@@ -277,7 +277,21 @@ check_research() {
     DICTATION_CONFIG="${DICTATION_CONFIG:-$CONFIG_FILE}" "$python" "$SCRIPT_DIR/research.py" --check
 }
 
+check_requirements() {
+    if [ ! -x "$VENV_DIR/bin/python3" ]; then
+        echo 'NOT CURRENT: virtual environment is missing' >&2
+        return 1
+    fi
+    local files=("$SCRIPT_DIR/requirements.txt")
+    if $WAYLAND; then
+        files+=("$SCRIPT_DIR/requirements-wayland.txt")
+    fi
+    "$VENV_DIR/bin/python3" "$SCRIPT_DIR/requirements_check.py" "${files[@]}"
+}
+
 if $CHECK_ONLY; then
+    # Fail before printing CURRENT, without pip/network or application imports.
+    check_requirements || exit 1
     detect_ld_path
     log_ok=true
     check_llm_log || log_ok=false
@@ -307,15 +321,22 @@ fi
 if [ ! -d "$VENV_DIR" ]; then
     echo "Creating virtual environment..."
     python3 -m venv "$VENV_DIR"
-    source "$VENV_DIR/bin/activate"
-    pip install -r "$SCRIPT_DIR/requirements.txt"
-    echo "Virtual environment created and dependencies installed."
+    echo "Virtual environment created."
 else
     echo "Virtual environment already exists."
 fi
 
-if $WAYLAND; then
-    "$VENV_DIR/bin/python3" -m pip install -r "$SCRIPT_DIR/requirements-wayland.txt"
+# Inspect actual installed versions, not a stamp which can outlive a removed
+# package. Existing venvs get the same requirements as freshly created ones.
+if ! check_requirements; then
+    requirements_args=(-r "$SCRIPT_DIR/requirements.txt")
+    if $WAYLAND; then
+        requirements_args+=(-r "$SCRIPT_DIR/requirements-wayland.txt")
+    fi
+    "$VENV_DIR/bin/python3" -m pip install "${requirements_args[@]}"
+    check_requirements || exit 1
+else
+    echo "Requirements already satisfied; pip skipped."
 fi
 
 # Discover libraries only after a new venv and its dependencies exist.

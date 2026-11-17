@@ -24,6 +24,24 @@ with its default. Copy it, or add only the keys you change. A change takes effec
 after `systemctl --user restart spraakherkenning`; the file is not watched.
 Restart only when no dictation is running.
 
+## Installer dependencies
+
+Every `install.sh` run checks the venv's installed distribution versions against
+`requirements.txt`, plus `requirements-wayland.txt` with `--wayland` (also selected
+automatically in a Wayland session). Missing or incompatible requirements trigger
+one `venv/bin/python3 -m pip install -r ...` for the selected files, followed by
+verification. Satisfied requirements skip pip, including in an existing venv.
+The installer still applies the service and restarts it as before: run it only
+when no dictation is running.
+
+`install.sh --check` performs the same metadata/version check offline, without
+pip installation or application imports, before reporting `CURRENT`. It checks
+the selected direct requirements, not all transitive dependencies or binary
+library health. The checker uses pip's bundled PEP 508 parser and supports the
+repository's flat package/version requirements and environment markers. URLs,
+extras and pip directives fail closed; extend the checker before using them.
+No hash stamp is needed, so removing a package after installation is detected.
+
 ## Precedence
 
 From high to low:
