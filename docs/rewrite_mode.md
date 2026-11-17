@@ -112,7 +112,17 @@ formatting or ownership record contains text.
    survives any later failure.
 3. One request to an OpenAI-compatible chat endpoint, with a JSON-schema
    answer and a hard total time-out (default 30 s). A following session can
-   start meanwhile; it records at once and pastes after this one.
+   start meanwhile; it records at once and pastes after this one. The prompt
+   treats the dictation as raw speech (thinking aloud: repetitions, detours,
+   self-corrections, the order in which thoughts came up), not as text to
+   tidy. The model first fills two planning fields, the core message
+   (`kern`/`core`) and each distinct point once in the order it will write
+   them (`punten`/`points`), and only then writes the text: its own order and
+   sentences, each thought once, no closing recap, in the user's own voice,
+   nothing invented or dropped. The planning fields are never pasted or
+   logged. This costs roughly half a second more than writing directly;
+   model reasoning stays off because it added about four seconds for little
+   gain.
 4. The answer is checked: empty, more than 1.2x or fewer than 0.15x the raw
    word count, an introduction ("Here is…"), a truncated or malformed answer all
    count as failure. Quotes or a code fence around the whole answer are removed.

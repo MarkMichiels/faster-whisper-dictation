@@ -64,6 +64,7 @@ def _s(*args, **kwargs) -> Setting:
 
 
 _RW = 'DICTATION_REWRITE_'
+REASONING_CHOICES = ('never', 'email', 'always')
 
 # One table: defaults here are exactly the code defaults. argparse defaults,
 # validation, docs/configuration.md and config.example.yaml all come from it.
@@ -132,6 +133,9 @@ SCHEMA: tuple[Setting, ...] = (
     _s('rewrite.timeout_s', 'float', 30, 'Hard total time-out in seconds.', env=_RW + 'TIMEOUT_S', low=1, high=120),
     _s('rewrite.word_factor', 'float', 0, 'Word maximum for long dictations as factor x words; 0 = off.',
        env=_RW + 'WORD_FACTOR', low=0, high=1),
+    _s('rewrite.reasoning', 'str', 'never', 'Model reasoning before writing: never, email (only when an email '
+       'may be built) or always. Better order and fewer repetitions, but about 4 s slower.',
+       env=_RW + 'REASONING', choices=REASONING_CHOICES),
     _s('rewrite.provider_order', 'list', [], 'OpenRouter provider preference, e.g. [together, fireworks].',
        env=_RW + 'PROVIDER_ORDER'),
     _s('rewrite.signature', 'str', '', 'Name under the sign-off of an email; may span lines.',

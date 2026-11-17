@@ -62,6 +62,7 @@ rewrite:
   # terms_file: null    # Path of a term list, one term per line.
   # timeout_s: 30    # Hard total time-out in seconds.
   # word_factor: 0    # Word maximum for long dictations as factor x words; 0 = off.
+  # reasoning: never    # Model reasoning before writing: never, email (only when an email may be built) or always. Better order and fewer repetitions, but about 4 s slower.
   # provider_order: []    # OpenRouter provider preference, e.g. [together, fireworks].
   # signature: ""    # Name under the sign-off of an email; may span lines.
   context:

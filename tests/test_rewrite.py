@@ -486,7 +486,7 @@ class PrivacyTests(RewriteTestCase):
         system, user = (m['content'] for m in bodies[0]['messages'])
         self.assertIn('Voorkeuren van de gebruiker:\nSpreek de lezer aan met u.', system)
         self.assertIn('Schrijf deze termen exact zo:\nVoorbeeldstad', system)
-        self.assertTrue(system.endswith('Geef JSON terug met de velden "mail", "aanhef", "tekst" en "afsluiting".'))
+        self.assertTrue(system.endswith('Geef JSON terug met de velden "kern", "punten", "mail", "aanhef", "tekst" en "afsluiting".'))
         self.assertIn('<context>\nCONTEXT-MARKER-XYZ', user)
         self.assertIn('</context>\n\n<dictaat>\n', user)
         self.assertTrue(user.endswith('</dictaat>'))
@@ -495,7 +495,7 @@ class PrivacyTests(RewriteTestCase):
         self.assertEqual(body['provider']['data_collection'], 'deny')
         self.assertEqual(body['reasoning'], {'enabled': False})
         self.assertEqual(body['response_format']['json_schema']['schema']['required'],
-                         ['mail', 'aanhef', 'tekst', 'afsluiting'])
+                         ['kern', 'punten', 'mail', 'aanhef', 'tekst', 'afsluiting'])
 
     def test_without_style_file_prompt_is_plain_v2(self):
         messages, _ = rewrite.build_messages('tekst', 'nl', None, config(style_file='/nonexistent/style.md'))
@@ -515,6 +515,76 @@ def mail_answer(fields, finish='stop'):
     return {'choices': [{'message': {'content': json.dumps(fields)}, 'finish_reason': finish}],
             'usage': {'prompt_tokens': 700, 'completion_tokens': 60, 'cost': 0.0003},
             'provider': 'FakeProvider'}
+
+
+class InterpretationTests(unittest.TestCase):
+    """The dictation is raw speech: the model plans core and points first, then writes."""
+
+    def test_prompt_treats_dictation_as_raw_speech(self):
+        for lang, words in (('nl', ('ruwe spraakherkenning', 'gesproken denken',
+                                    'Volg de zinnen en de volgorde van het dictaat niet',
+                                    'Zeg elke gedachte één keer', 'Verzin niets')),
+                            ('en', ('raw speech recognition', 'thinking aloud',
+                                    'Do not follow the sentences and the order of the dictation',
+                                    'Say each thought once', 'Invent nothing'))):
+            prompt = rewrite.system_prompt(lang, config(), 50)
+            for text in words:
+                self.assertIn(text, prompt, lang)
+
+    def test_plan_fields_come_first_and_are_required(self):
+        for lang, plan in (('nl', ['kern', 'punten']), ('en', ['core', 'points'])):
+            messages, field = rewrite.build_messages('x', lang, None, config())
+            schema = rewrite.response_format(field)['json_schema']['schema']
+            self.assertEqual(schema['required'][:2], plan)
+            self.assertEqual(schema['properties'][plan[1]], {'type': 'array', 'items': {'type': 'string'}})
+            for name in plan:
+                self.assertIn('"%s"' % name, messages[0]['content'])
+
+    def test_plan_is_never_pasted_or_logged(self):
+        answer = {'kern': 'PLAN-KERN-XYZ', 'punten': ['PLAN-PUNT-XYZ'], 'mail': False, 'aanhef': '',
+                  'tekst': 'De pompen komen vrijdag.', 'afsluiting': ''}
+        for rich in (False, True):
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                result = rewrite.rewrite('eh de pompen komen vrijdag ja vrijdag dus', 'nl', None, config(),
+                                         call=lambda *a: mail_answer(answer), rich=rich)
+            self.assertTrue(result.ok)
+            self.assertEqual(result.text, 'De pompen komen vrijdag.')
+            self.assertNotIn('PLAN-', result.text + (result.html or '') + out.getvalue())
+
+    def test_answer_budget_leaves_room_for_the_plan(self):
+        bodies = []
+        with contextlib.redirect_stdout(io.StringIO()):
+            rewrite.rewrite('woord ' * 300, 'nl', None, config(),
+                            call=lambda c, body, t: bodies.append(body) or llm_answer('kort ' * 100))
+        self.assertEqual(bodies[0]['max_tokens'], 1200)
+        self.assertEqual(bodies[0]['reasoning'], {'enabled': False})
+
+    def body_for(self, cfg, raw, context=None):
+        bodies = []
+        with contextlib.redirect_stdout(io.StringIO()) as out:
+            rewrite.rewrite(raw, 'nl', context, cfg,
+                            call=lambda c, body, t: bodies.append(body) or llm_answer(raw))
+        return bodies[0], out.getvalue()
+
+    def test_reasoning_setting(self):
+        env = {'DICTATION_REWRITE_ENDPOINT': ENDPOINT, 'DICTATION_REWRITE_MODEL': 'fake/model'}
+        self.assertEqual(rewrite.load_config(env)[0].reasoning, 'never')
+        self.assertEqual(rewrite.load_config(dict(env, DICTATION_REWRITE_REASONING='Email'))[0].reasoning, 'email')
+        self.assertEqual(rewrite.load_config(dict(env, DICTATION_REWRITE_REASONING='high')),
+                         (None, 'invalid_reasoning'))
+        mail_context = 'Van: Jan <jan@voorbeeld.invalid>\n\nBeste,\n\nKomt het vrijdag?\n\nGroeten,\nJan'
+        cases = (('never', 'dit is een mail aan Jan het komt vrijdag', None, False),
+                 ('email', 'dit is een mail aan Jan het komt vrijdag', None, True),
+                 ('email', 'het komt vrijdag zeg ik je', mail_context, True),
+                 ('email', 'het komt vrijdag zeg ik je', 'Komt het vrijdag?', False),
+                 ('email', 'het komt vrijdag zeg ik je', None, False),
+                 ('always', 'het komt vrijdag zeg ik je', None, True))
+        for mode, raw, context, think in cases:
+            body, journal = self.body_for(config(reasoning=mode), raw, context)
+            self.assertEqual(body['reasoning'], {'effort': 'low'} if think else {'enabled': False}, (mode, raw))
+            self.assertEqual(body['max_tokens'], 4000 if think else 600, (mode, raw))
+            self.assertIn('"reasoning": %s' % ('true' if think else 'false'), journal)
 
 
 class EmailTests(unittest.TestCase):
@@ -573,7 +643,7 @@ class EmailTests(unittest.TestCase):
             messages, field = rewrite.build_messages('x', lang, None, config())
             schema = rewrite.response_format(field)['json_schema']['schema']
             self.assertEqual(schema['properties'][flag], {'type': 'boolean'})
-            self.assertEqual(schema['required'][2], field)
+            self.assertEqual(schema['required'][4], field)
             self.assertIn('"%s"' % flag, messages[0]['content'])
 
     def test_email_is_composed_with_signature(self):

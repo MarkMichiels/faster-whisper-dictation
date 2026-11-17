@@ -132,6 +132,7 @@ table and `config.example.yaml` in step with the code.
 | `rewrite.terms_file` | string or null | `null` |  |  | `DICTATION_REWRITE_TERMS_FILE` | Path of a term list, one term per line. |
 | `rewrite.timeout_s` | float | `30` | 1–120 |  | `DICTATION_REWRITE_TIMEOUT_S` | Hard total time-out in seconds. |
 | `rewrite.word_factor` | float | `0` | 0–1 |  | `DICTATION_REWRITE_WORD_FACTOR` | Word maximum for long dictations as factor x words; 0 = off. |
+| `rewrite.reasoning` | string | `never` | never | email | always |  | `DICTATION_REWRITE_REASONING` | Model reasoning before writing: never, email (only when an email may be built) or always. Better order and fewer repetitions, but about 4 s slower. |
 | `rewrite.provider_order` | list of strings | `[]` |  |  | `DICTATION_REWRITE_PROVIDER_ORDER` | OpenRouter provider preference, e.g. [together, fireworks]. |
 | `rewrite.signature` | string | `""` |  |  | `DICTATION_REWRITE_SIGNATURE` | Name under the sign-off of an email; may span lines. |
 | `rewrite.context.max_chars` | int | `100000` | 1000–500000 |  | `DICTATION_REWRITE_CONTEXT_MAX_CHARS` | Most characters of reply context sent. |
