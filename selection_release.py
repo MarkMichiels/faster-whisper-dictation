@@ -208,6 +208,21 @@ def may_fire(trace: TraceSnapshot, started_at: float, now: float, modifiers_held
     return True, 'ok'
 
 
+def input_since(trace: TraceSnapshot, since: float, mouse_after: Optional[float] = None) -> Optional[str]:
+    """'mouse', 'key', 'mouse+key' or None: user input the trace saw after `since`.
+
+    Used by the paste guard: a click or typed key after stop may have moved
+    the caret. `mouse_after` (>= since) skips presses up to that moment, the
+    press that stopped or started dictation itself. Ctrl+A counts (a paste
+    would replace the selection); modifiers, the start key and copy keys do
+    not, and neither do our own injected keys.
+    """
+    floor = since if mouse_after is None else max(since, mouse_after)
+    mouse = trace.last_mouse_press_at is not None and trace.last_mouse_press_at > floor
+    key = any(at is not None and at > since for at in (trace.last_other_key_at, trace.select_all_at))
+    return '+'.join(name for name, seen in (('mouse', mouse), ('key', key)) if seen) or None
+
+
 def wait_and_release(trace: InputTrace, started_at: float, planned_window: int,
                      modifiers_held: Callable[[], bool], send: Callable[[], None],
                      session_active: Callable[[], bool] = lambda: True,

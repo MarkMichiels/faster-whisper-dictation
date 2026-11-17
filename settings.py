@@ -125,6 +125,8 @@ SCHEMA: tuple[Setting, ...] = (
     _s('output.stop_status', 'bool', True, 'Paste a [Controle: ...] line after a session with a correction.'),
     _s('output.status_box', 'bool', True, 'Wayland: a status box top right while dictation runs (mode, phase, '
        'counts; never text). Replaces the context badge; false = badge only (rewrite.context.badge).'),
+    _s('output.hold_after_input', 'bool', True, 'After stop, a mouse press or typed key may have moved the '
+       'cursor: text still to come goes to CopyQ/clipboard instead of being pasted.'),
     _s('output.extra_terminal_classes', 'list', [], 'Extra window classes that paste with Ctrl+Shift+V '
        '(added to the built-in list).'),
     _s('sounds.start', 'str', 'assets/granted-04.wav', 'Start sound (WAV); relative to the working directory.'),

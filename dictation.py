@@ -45,6 +45,10 @@ CONTEXT_MAX_AGES = None   # None: context_capture's own PRIMARY/CLIPBOARD limits
 RELEASE_SELECTION = True  # rewrite.context.release_selection
 CONTEXT_BADGE = True      # rewrite.context.badge
 STATUS_BOX = True         # output.status_box (Wayland only; replaces the badge)
+HOLD_AFTER_INPUT = True   # output.hold_after_input
+# A mouse press this long after a thumb-button stop or start is that gesture
+# itself (mouse.coalesce_s 0.4 plus margin), not a click that moved the caret.
+GESTURE_PRESS_S = 0.5
 REPLACEMENTS = None       # recognition.replacements_file, as a replacements.ReplacementList
 
 # ---------------------------------------------------------------------------
@@ -998,6 +1002,9 @@ class KeyboardReplayer():
         self.kb = keyboard.Controller()
         # Window-ID waar de dictatie begon — paste landt hier ook als focus tussendoor verschuift.
         self.target_wid = None
+        # Called right before our own key events (X11: the key listener hears
+        # XTest, so the input trace must not count our Ctrl+V as typing).
+        self.inject_hook = None
 
     def window_id(self):
         """Active window id, or None."""
@@ -1156,6 +1163,9 @@ class KeyboardReplayer():
 
     def _send_paste(self, terminal):
         """Send the paste shortcut: Ctrl+Shift+V in terminals, Ctrl+V elsewhere."""
+        hook = getattr(self, 'inject_hook', None)
+        if hook:
+            hook()
         self.kb.press(keyboard.Key.ctrl)
         if terminal:
             self.kb.press(keyboard.Key.shift)
@@ -1178,19 +1188,30 @@ class KeyboardReplayer():
             return type(exc).__name__
 
     def type_text(self, text: str, echo: bool = True, rewrite_mode: bool = False,
-                  html: str | None = None, terminal_mode: bool = False) -> dict | None:
+                  html: str | None = None, terminal_mode: bool = False,
+                  hold: str | None = None) -> dict | None:
         """Paste only; never synthesize character or Return key events.
 
         Plain MIME is always single-line, including recovery/status text.
         HTML requires explicit rich rewrite permission. WM_CLASS only selects
         the shortcut; terminal_mode forces Ctrl+Shift+V and forbids HTML.
         echo=False keeps rewritten content out of stdout/the journal.
+        hold: a reason not to paste (the caret may have moved). The text then
+        only goes to CopyQ and the clipboard: no window activation, no
+        shortcut, two low tones.
         """
         if not text:
             return
         if echo:
             print(text)
-        focus_ok = self._restore_target_window()
+        if hold:
+            focus_ok, refocused = None, None
+        else:
+            target = getattr(self, 'target_wid', None)
+            before = self.window_id() if target else None
+            focus_ok = self._restore_target_window()
+            # The target had lost focus and was activated again (focus moved).
+            refocused = bool(target) and before != target
         wm_class = self._get_active_window_class()
         # For the LLM log only (password-manager skip); never journaled.
         self.last_window_class = wm_class
@@ -1213,6 +1234,15 @@ class KeyboardReplayer():
             self._delivery_alert()
         result['paste'] = 'not_sent'
         result['focus_ok'] = focus_ok
+        # Metadata only: the window class, never a title or text.
+        result['app'] = wm_class or None
+        result['refocused'] = refocused
+        if hold:
+            # Text is safe in CopyQ and on the clipboard; Mark pastes it himself.
+            result.update(paste='held_' + hold, held=True)
+            self._delivery_alert()
+            diagnostic('paste_delivery', **result)
+            return result
         if not focus_ok:
             result['ok'] = False
         if result['ok']:
@@ -1621,6 +1651,8 @@ class MouseToggleListener():
         if now - self.last_fire_time < self.COALESCE_WINDOW:
             return
         self.last_fire_time = now
+        # Journal metadata: which thumb button toggled (its name, no position).
+        self.last_button = getattr(button, 'name', None)
         self.toggle_callback()
 
     def start(self):
@@ -1817,7 +1849,7 @@ def parse_args(argv=None, environ=None):
 def apply_settings(loaded, environ=None):
     """Settings without a CLI option go to the module and class attributes that hold them."""
     global SOUND_START, SOUND_STOP, REWRITE_ENVIRON, CONTEXT_MAX_AGES, RELEASE_SELECTION, CONTEXT_BADGE
-    global REPLACEMENTS, STATUS_BOX
+    global REPLACEMENTS, STATUS_BOX, HOLD_AFTER_INPUT
     import coverage_ledger
     import replacements
     MultiTapKeyListener.TAP_WINDOW = loaded.get('keys.tap_window_s')
@@ -1834,6 +1866,7 @@ def apply_settings(loaded, environ=None):
     RELEASE_SELECTION = loaded.get('rewrite.context.release_selection')
     CONTEXT_BADGE = loaded.get('rewrite.context.badge')
     STATUS_BOX = loaded.get('output.status_box')
+    HOLD_AFTER_INPUT = loaded.get('output.hold_after_input')
     # A missing or broken list only gives a journal warning; never a stop.
     REPLACEMENTS = replacements.load(loaded.get('recognition.replacements_file'),
                                      coverage_ledger.diagnostic)
@@ -2022,6 +2055,13 @@ class App():
             self.mic_silent = False
             self.pasted = 0
             self.paste_failed = 0
+            # Paste guard (time.monotonic): when the session started and
+            # stopped, the last paste, and text held instead of pasted.
+            self.started_at = time.monotonic()
+            self.stopped_at = None
+            self.stop_mouse = False
+            self.last_paste_at = None
+            self.held_texts = []
 
     def __init__(self, args):
         self.args = args
@@ -2173,7 +2213,7 @@ class App():
         finally:
             recovery.close()
 
-    def start(self, language=_UNSET, rewrite_mode=False, keys=None):
+    def start(self, language=_UNSET, rewrite_mode=False, keys=None, button=None):
         """Begin a streaming dictation session.
 
         language: transcription language for THIS session, chosen at start
@@ -2251,6 +2291,8 @@ class App():
             start_meta['output_language'] = None if language is _UNSET else language
         if keys:
             start_meta['keys'] = keys
+        if button:
+            start_meta['button'] = button  # thumb-button start (name only)
         diagnostic('session_start', max_seconds=MAX_SECONDS, pcm_bytes_per_minute=RATE*2*60,
                    rewrite=rewrite_mode and not research_mode, research=research_mode, mode=session.mode,
                    **start_meta)
@@ -2373,11 +2415,12 @@ class App():
         except Exception as exc:
             diagnostic('selection_release', fired=False, reason='error', error=type(exc).__name__, wait_s=0)
 
-    def stop(self):
+    def stop(self, trigger='key', button=None):
         """Stop the current dictation session."""
         if not self.active:
             return None
 
+        self._mark_stopped(getattr(self, 'session', None), trigger, button)
         print('Stopping ...')
         self.beep("finish_recording", wait=False)  # immediate feedback
         if self.timer is not None:
@@ -2404,6 +2447,7 @@ class App():
         if not self.active:
             return None
 
+        self._mark_stopped(getattr(self, 'session', None), 'auto')
         print('Auto-stopping (silence timeout) ...')
         self.beep("finish_recording", wait=True)
         self.beep("finish_recording", wait=False)
@@ -2421,6 +2465,80 @@ class App():
         print('Timer stop')
         self.ledger.incident('timer_stop')
         self._auto_stop()
+
+    def _mark_stopped(self, session, trigger, button=None):
+        """Remember when and how the session stopped, for the paste guard. Never raises."""
+        try:
+            if session is None or session.stopped_at is not None:
+                return
+            session.stopped_at = time.monotonic()
+            session.stop_mouse = trigger == 'mouse'
+            meta = dict(button=button) if button else {}
+            diagnostic('session_stop', trigger=trigger, **meta)
+        except Exception:
+            pass
+
+    def _paste_guard(self, session):
+        """(hold reason or None, metadata) for the next paste of session. Never raises.
+
+        After stop, a mouse press or a typed key (Ctrl+A included) may have
+        moved the caret or the focus: the paste would land where Mark clicked
+        or typed, not after his dictation. Then the text is held in CopyQ and
+        on the clipboard instead (output.hold_after_input). During recording
+        the same input is only journaled. Metadata only, never text or keys.
+        """
+        meta = {}
+        try:
+            now = time.monotonic()
+            stopped = getattr(session, 'stopped_at', None)
+            if stopped is not None:
+                meta['since_stop_s'] = round(now - stopped, 2)
+            trace = getattr(self, 'input_trace', None)
+            snap = trace.snapshot() if trace is not None else None
+            if snap is None or not snap.keys_known:
+                meta['guard'] = 'unknown'
+                return None, meta
+            for name, at in (('mouse_ago_s', snap.last_mouse_press_at), ('key_ago_s', snap.last_other_key_at)):
+                if at is not None and 0 <= now - at <= 600:
+                    meta[name] = round(now - at, 1)
+            gesture = getattr(self, '_gesture_at', None)
+            mouse_after = None if gesture is None else gesture + GESTURE_PRESS_S
+            since_paste = getattr(session, 'last_paste_at', None) or getattr(session, 'started_at', now)
+            meta['input_since_paste'] = selection_release.input_since(snap, since_paste, mouse_after)
+            if stopped is None:
+                meta['guard'] = 'recording'
+                return None, meta
+            if getattr(session, 'stop_mouse', False):
+                mouse_after = max(mouse_after or stopped, stopped + GESTURE_PRESS_S)
+            after = selection_release.input_since(snap, stopped, mouse_after)
+            meta['input_after_stop'] = after
+            if after and HOLD_AFTER_INPUT:
+                meta['guard'] = 'held'
+                return 'input_after_stop', meta
+            meta['guard'] = 'off' if after else 'clear'
+            return None, meta
+        except Exception as exc:
+            meta.update(guard='error', error=type(exc).__name__)
+            return None, meta
+
+    def _paste(self, session, text, **kwargs):
+        """Paste text for session through the guard; held text accumulates, so
+        the clipboard always has everything of this session not pasted."""
+        hold, meta = self._paste_guard(session)
+        try:
+            diagnostic('paste_guard', mode=getattr(session, 'mode', None), **meta)
+        except Exception:
+            pass  # the journal line must never block a paste
+        try:
+            if hold:
+                if getattr(session, 'held_texts', None) is None:
+                    session.held_texts = []
+                session.held_texts.append(text)
+                joined = ''.join(session.held_texts).strip()
+                return self.replayer.type_text(joined, hold=hold, **kwargs)
+            return self.replayer.type_text(text, **kwargs)
+        finally:
+            session.last_paste_at = time.monotonic()
 
     def _fix_paste_window(self, session):
         """Rewrite mode pastes where the focus is at stop, fixed from then on:
@@ -2446,8 +2564,15 @@ class App():
         start ordinary dictation in the configured language (-l). Never the
         language of the previous session, which a Left-Shift start leaves on
         the shared transcription worker."""
+        return self._toggle()
+
+    def _toggle(self, button=None):
+        if button:
+            self._gesture_at = time.monotonic()
         if self.active:
-            return self.stop()
+            return self.stop('mouse', button) if button else self.stop()
+        if button:
+            return self.start(self.args.language, button=button)
         return self.start(self.args.language)
 
     def _session_from_attributes(self):
@@ -2658,17 +2783,19 @@ class App():
             if html and status:
                 import rich_text
                 html += rich_text.literal_paragraphs('\n'.join(status))
-            delivery = self.replayer.type_text(
-                text, echo=False, rewrite_mode=True, html=html,
+            delivery = self._paste(
+                session, text, echo=False, rewrite_mode=True, html=html,
                 terminal_mode=getattr(session, 'terminal_mode', False))
         except Exception as exc:
             delivery = dict(ok=False, path='exception', error=type(exc).__name__)
         diagnostic('rewrite_delivery', rewritten=result.ok,
                    paste_window='stop' if session.paste_wid else 'start',
                    **{k: v for k, v in (delivery or {}).items() if k != 'text'})
-        self.beep('rewrite_done' if result.ok and (delivery or {}).get('ok') else 'rewrite_failed', wait=False)
-        self._status(session, 'pasted' if result.ok and (delivery or {}).get('ok') else
-                     'raw_pasted' if (delivery or {}).get('ok') else 'paste_refused', final=True)
+        # Held text (input after stop) is safe in CopyQ, but not pasted.
+        landed = bool((delivery or {}).get('ok')) and not (delivery or {}).get('held')
+        self.beep('rewrite_done' if result.ok and landed else 'rewrite_failed', wait=False)
+        self._status(session, 'pasted' if result.ok and landed else
+                     'raw_pasted' if landed else 'paste_refused', final=True)
         self._log_rewrite(session, raw, result, delivery, None if output is _UNSET else output)
 
     def _log_rewrite(self, session, raw, result, delivery, language):
@@ -2685,7 +2812,8 @@ class App():
                        provider=meta.get('provider'), system_prompt=getattr(result, 'system_prompt', None),
                        seconds=meta.get('seconds'), call=getattr(result, 'call', None),
                        status=status, reason=None if result.ok else result.reason,
-                       delivered='pasted' if (delivery or {}).get('ok') else 'none',
+                       delivered='pasted' if (delivery or {}).get('ok') and not (delivery or {}).get('held')
+                       else 'clipboard' if (delivery or {}).get('held') else 'none',
                        context=session.context, input=raw, output=getattr(result, 'answer', None),
                        window_class=window_class if isinstance(window_class, str) else '',
                        password_field=bool(getattr(session, 'context_secret', False)))
@@ -2801,6 +2929,7 @@ class App():
             with self._paste_lock:
                 focus = self.replayer.window_id()
                 if outcome.status == 'done' and settled and job.paste_wid and focus == job.paste_wid:
+                    self._research_paste_guard(job)
                     previous = self.replayer.target_wid
                     self.replayer.target_wid = job.paste_wid
                     try:
@@ -2837,9 +2966,30 @@ class App():
                    box=job.phase, box_step=job.step, steps=outcome.steps, seconds=outcome.seconds,
                    blocked=len(outcome.blocked), blocked_tools=sorted(set(outcome.blocked)),
                    session_id=outcome.session_id, cost=outcome.cost, returncode=outcome.returncode,
-                   **{k: v for k, v in delivery.items() if k in ('path', 'paste', 'focus_ok', 'ownership')})
+                   **{k: v for k, v in delivery.items()
+                      if k in ('path', 'paste', 'focus_ok', 'ownership', 'app', 'refocused')})
         self._log_research(job, outcome, delivered)
         job.context = job.raw = None
+
+    def _research_paste_guard(self, job):
+        """Journal-only paste guard for a research result. Never holds: the
+        unchanged-focus check decides, and input during a minutes-long run is
+        normal. Metadata only, never text or keys. Never raises."""
+        meta = dict(mode='research', guard='journal')
+        try:
+            meta['since_start_s'] = round(time.monotonic() - job.started, 1)
+            trace = getattr(self, 'input_trace', None)
+            snap = trace.snapshot() if trace is not None else None
+            if snap is None or not snap.keys_known:
+                meta['guard'] = 'unknown'
+            else:
+                meta['input_since_start'] = selection_release.input_since(snap, job.started)
+        except Exception as exc:
+            meta.update(guard='error', error=type(exc).__name__)
+        try:
+            diagnostic('paste_guard', **meta)
+        except Exception:
+            pass
 
     def _log_research(self, job, outcome, delivered):
         """One llm_content row (no llm_call row: Pi keeps the session itself)."""
@@ -2891,9 +3041,9 @@ class App():
                             prefix = '' if first_chunk else ' '
                             first_chunk = False
                             if getattr(session, 'terminal_mode', False):
-                                result = self.replayer.type_text(prefix + correction, terminal_mode=True)
+                                result = self._paste(session, prefix + correction, terminal_mode=True)
                             else:
-                                result = self.replayer.type_text(prefix + correction)
+                                result = self._paste(session, prefix + correction)
                             self._count_paste(session, result)
                             return result
                         self._stop_check(ledger, deliver)
@@ -2925,8 +3075,8 @@ class App():
                     text = ' ' + text
 
             try:
-                result = (self.replayer.type_text(text, terminal_mode=True)
-                          if getattr(session, 'terminal_mode', False) else self.replayer.type_text(text))
+                result = (self._paste(session, text, terminal_mode=True)
+                          if getattr(session, 'terminal_mode', False) else self._paste(session, text))
             except Exception as exc:
                 result = dict(ok=False, path='exception', error=str(exc))
             self._count_paste(session, result)
@@ -2938,7 +3088,7 @@ class App():
         """Counts for the status box only: pasted or refused, never the text."""
         if result is None:
             return
-        if result.get('ok'):
+        if result.get('ok') and not result.get('held'):
             session.pasted = getattr(session, 'pasted', 0) + 1
         else:
             session.paste_failed = getattr(session, 'paste_failed', 0) + 1
@@ -2971,6 +3121,8 @@ class App():
             )
             self.input_trace = selection_release.InputTrace(focus=self._focus_reader())
             keylistener.trace = self.input_trace
+            # X11: the listener hears our own XTest Ctrl+V; never count it as typing.
+            self.replayer.inject_hook = self.input_trace.injecting
             self.key_listener = keylistener
             config = getattr(self, 'research_config', None)
             if config is not None and config.escape_cancels:
@@ -2984,8 +3136,10 @@ class App():
             keylistener = KeyListener(self.toggle, normalize_key_names(key))
             print("Press ", key, " to start/stop recording.")
 
-        self.mouse_listener = MouseToggleListener(
-            self.toggle, (self.args.mouse_buttons or '').split(',')).start()
+        toggler = MouseToggleListener(
+            lambda: self._toggle(getattr(toggler, 'last_button', None) or 'unknown'),
+            (self.args.mouse_buttons or '').split(','))
+        self.mouse_listener = toggler.start()
 
         keylistener.run()
 

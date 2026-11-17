@@ -123,6 +123,7 @@ table and `config.example.yaml` in step with the code.
 | `output.ellipsis_style` | string | `space` | space \| single \| keep | `--ellipsis-style` |  | How '...' is typed: space, single or keep. |
 | `output.stop_status` | bool | `true` |  |  |  | Paste a [Controle: ...] line after a session with a correction. |
 | `output.status_box` | bool | `true` |  |  |  | Wayland: a status box top right while dictation runs (mode, phase, counts; never text). Replaces the context badge; false = badge only (rewrite.context.badge). |
+| `output.hold_after_input` | bool | `true` |  |  |  | After stop, a mouse press or typed key may have moved the cursor: text still to come goes to CopyQ/clipboard instead of being pasted. |
 | `output.extra_terminal_classes` | list of strings | `[]` |  |  |  | Extra window classes that paste with Ctrl+Shift+V (added to the built-in list). |
 | `sounds.start` | string | `assets/granted-04.wav` |  |  |  | Start sound (WAV); relative to the working directory. |
 | `sounds.stop` | string | `assets/beepbeep.wav` |  |  |  | Stop sound (WAV); relative to the working directory. |
