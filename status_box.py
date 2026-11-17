@@ -16,6 +16,11 @@ Phases (codes, see wayland_io.STATUS_PHASES):
   nothing, mic_silent,          ends without a (complete) paste; the box
   paste_refused, raw_pasted     stays a few seconds longer
 
+Research mode (research.py) has a box state of its own, research(phase, step,
+seconds, steps): phase researching/done/clipboard/failed, a step or reason
+code, the elapsed seconds and the number of tool steps. The app sends it only
+while the dictation does not need the box.
+
 Only the newest state matters: when states queue up behind a slow call, the
 sender skips to the latest one. A failed call is journalled once per change
 of availability. When the helper is too old to know SetStatus and context was
@@ -47,9 +52,11 @@ class StatusBox:
 
     def __init__(self, send: Callable[..., None], clear: Callable[[], None],
                  badge: Optional[Callable[[int], None]] = None,
+                 research: Optional[Callable[..., None]] = None,
                  log: Optional[Callable[..., None]] = None,
                  spawn: Optional[Callable[[Callable[[], None]], None]] = None) -> None:
         self._send, self._clear, self._badge = send, clear, badge
+        self._research = research
         self._log = log or (lambda kind, **details: None)
         self._spawn = spawn or (lambda fn: threading.Thread(target=fn, daemon=True).start())
         self._lock = threading.Lock()
@@ -62,6 +69,12 @@ class StatusBox:
 
     def clear(self) -> None:
         self._post(('clear',))
+
+    def research(self, phase: str, step: str = '', seconds: int = 0, steps: int = 0) -> None:
+        """Research box (codes and counts only). Raises when no sender: the caller skips."""
+        if self._research is None:
+            raise RuntimeError('research box not available')
+        self._post(('research', phase, step or '', max(0, int(seconds or 0)), max(0, int(steps or 0))))
 
     def _post(self, state: tuple) -> None:
         try:
@@ -89,6 +102,8 @@ class StatusBox:
         try:
             if state[0] == 'clear':
                 self._clear()
+            elif state[0] == 'research':
+                self._research(*state[1:])
             else:
                 self._send(*state[1:])
             if self.available is not True:

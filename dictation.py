@@ -2090,6 +2090,7 @@ class App():
         import status_box
         box = status_box.StatusBox(replayer.show_status, replayer.clear_status,
                                    badge=replayer.show_badge if CONTEXT_BADGE else None,
+                                   research=getattr(replayer, 'show_research', None),
                                    log=diagnostic)
         box.clear()  # a box left behind by a previous instance that died
         return box
@@ -2581,6 +2582,7 @@ class App():
                     and session is getattr(self, 'session', None):
                 self.status.clear()
                 self._dictation_box_until = 0.0
+                self._box_writes = getattr(self, '_box_writes', 0) + 1
             # Context is reply material for this one session only.
             session.context = None
             # Release the next session even if this one failed.
@@ -2690,6 +2692,189 @@ class App():
         except Exception as exc:
             diagnostic('llm_log_dropped', reason='hook_error', error=type(exc).__name__)
 
+    # --- research mode (AltGr + double tap; research.py) -------------------
+    # Longest wait, after a session ends, for a running dictation to finish
+    # before the result is delivered; then it goes to the clipboard instead.
+    RESEARCH_SETTLE_S = 120.0
+    RESEARCH_TICK_S = 1.0
+
+    def _start_research(self, session, raw):
+        """Hand the dictation to a background Pi session and return at once.
+
+        The session's done flag is set by the caller right after this returns,
+        so ordinary dictation never waits for research."""
+        import types
+        import research  # local: tests load App without module imports
+        history = self.replayer.add_to_history(raw)
+        diagnostic('research_raw_saved', copyq_add=history)
+        session.status_final = True
+        if session is getattr(self, 'session', None):
+            self._dictation_box_until = 0.0
+        output = getattr(session, 'output_language', session.language)
+        language = None if output is _UNSET else output
+        job = types.SimpleNamespace(
+            started=time.monotonic(), phase='researching', step='starting', steps=0,
+            paste_wid=session.paste_wid or session.target_wid,
+            context=session.context,   # session.context is wiped when the session ends
+            context_secret=bool(getattr(session, 'context_secret', False)),
+            language=language, raw=raw, run=None, shown=None, writes=None)
+        self._research_job = job
+        runner = getattr(self, 'research_runner', None)
+
+        def on_progress(step, steps):
+            job.step, job.steps = step, steps
+
+        def on_finish(outcome):
+            self._research_finished(job, outcome)
+
+        try:
+            run = runner.start(research.build_prompt(raw, job.context, language), on_progress, on_finish) \
+                if runner is not None else None
+        except Exception as exc:
+            diagnostic('research_start_failed', error=type(exc).__name__)
+            run = None
+            busy = False
+        else:
+            busy = runner is not None and run is None
+        if run is None:
+            job.phase, job.step = 'failed', 'busy' if busy else 'start_failed'
+            job.context = None
+            self.beep('rewrite_failed', wait=False)
+            diagnostic('research_finished', status='failed', reason=job.step, delivered='none')
+        else:
+            job.run = run
+        self._research_ticker(job)
+
+    def _research_ticker(self, job):
+        """Keep the research box on screen whenever the dictation does not need it."""
+        if getattr(self, 'status', None) is None:
+            return   # X11 or box off: tones and the journal only
+        def loop():
+            while getattr(self, '_research_job', None) is job:
+                final = job.phase != 'researching'
+                if self._research_show(job) and final:
+                    return
+                time.sleep(self.RESEARCH_TICK_S)
+        threading.Thread(target=loop, daemon=True, name='research-status').start()
+
+    def _research_show(self, job):
+        """Send the research state when the box is free and it changed. True once shown."""
+        box = getattr(self, 'status', None)
+        if box is None or getattr(self, 'active', False) \
+                or time.monotonic() < getattr(self, '_dictation_box_until', 0.0):
+            return False
+        state = (job.phase, job.step, job.steps)
+        writes = getattr(self, '_box_writes', 0)
+        if state == job.shown and writes == job.writes:
+            return True
+        try:
+            box.research(job.phase, job.step, int(time.monotonic() - job.started), job.steps)
+        except Exception as exc:
+            diagnostic('status_box', sent=False, error=type(exc).__name__)
+            return False
+        job.shown, job.writes = state, writes
+        return True
+
+    def _research_settle(self):
+        """Wait (bounded) until no dictation records or is being delivered."""
+        deadline = time.monotonic() + self.RESEARCH_SETTLE_S
+        while time.monotonic() < deadline:
+            current = getattr(self, 'session', None)
+            if not getattr(self, 'active', False) and (current is None or current.done.is_set()):
+                return True
+            time.sleep(0.2)
+        return False
+
+    def _research_finished(self, job, outcome):
+        """Runs on the session's reader thread. Paste only into the unchanged window."""
+        import rich_text
+        delivered, step, phase = 'none', outcome.reason or outcome.status, 'failed'
+        delivery = {}
+        text = outcome.text if isinstance(outcome.text, str) and outcome.text.strip() else None
+        if outcome.status in ('done', 'question') and text:
+            plain, html = text, None
+            try:
+                plain, html = rich_text.render(text)
+            except Exception:
+                html = None
+            settled = self._research_settle()
+            with self._paste_lock:
+                focus = self.replayer.window_id()
+                if outcome.status == 'done' and settled and job.paste_wid and focus == job.paste_wid:
+                    previous = self.replayer.target_wid
+                    self.replayer.target_wid = job.paste_wid
+                    try:
+                        delivery = self.replayer.type_text(plain, echo=False, rewrite_mode=True, html=html) or {}
+                    except Exception as exc:
+                        delivery = dict(ok=False, path='exception', error=type(exc).__name__)
+                    finally:
+                        self.replayer.target_wid = previous
+                    if delivery.get('ok'):
+                        delivered, phase, step = 'pasted', 'done', ''
+                    else:
+                        # type_text put the text on the clipboard before it refused the paste.
+                        delivered, phase, step = 'clipboard', 'clipboard', 'paste_refused'
+                        clip_ok = delivery.get('copyq_copy') == 0 or delivery.get('xclip') == 0
+                        if not clip_ok:
+                            clip = self.replayer._set_clipboard(rich_text.single_line(plain), html) or {}
+                            clip_ok = bool(clip.get('ok'))
+                else:
+                    delivery = self.replayer._set_clipboard(rich_text.single_line(plain), html) or {}
+                    clip_ok = bool(delivery.get('ok'))
+                    delivered, phase = 'clipboard', 'clipboard'
+                    step = 'question' if outcome.status == 'question' else \
+                        'focus_changed' if settled else 'dictation_busy'
+                if phase == 'clipboard' and not clip_ok:
+                    delivered, phase, step = 'none', 'failed', 'clipboard_failed'
+        elif text:
+            # no_result with an explanation: keep it findable in CopyQ only.
+            self.replayer.add_to_history(text)
+        job.phase, job.step = phase, (step or '')[:40] if phase != 'done' else ''
+        if outcome.status == 'no_result' and not outcome.reason:
+            job.step = 'no_result'
+        self.beep('rewrite_done' if phase in ('done', 'clipboard') else 'rewrite_failed', wait=False)
+        diagnostic('research_finished', status=outcome.status, reason=outcome.reason, delivered=delivered,
+                   box=job.phase, box_step=job.step, steps=outcome.steps, seconds=outcome.seconds,
+                   blocked=len(outcome.blocked), blocked_tools=sorted(set(outcome.blocked)),
+                   session_id=outcome.session_id, cost=outcome.cost, returncode=outcome.returncode,
+                   **{k: v for k, v in delivery.items() if k in ('path', 'paste', 'focus_ok', 'ownership')})
+        self._log_research(job, outcome, delivered)
+        job.context = job.raw = None
+
+    def _log_research(self, job, outcome, delivered):
+        """One llm_content row (no llm_call row: Pi keeps the session itself)."""
+        log = getattr(self, 'llm_log', None)
+        if log is None:
+            return
+        status = {'done': 'ok', 'question': 'ok'}.get(outcome.status, outcome.status)
+        try:
+            log.record(kind='research', mode='research', language=job.language,
+                       model=getattr(getattr(self, 'research_config', None), 'model', None),
+                       seconds=outcome.seconds, status=status,
+                       reason=outcome.reason or ('question' if outcome.status == 'question' else None),
+                       delivered=delivered, context=job.context, input=job.raw, output=outcome.text,
+                       pi_session_id=outcome.session_id, pi_session_file=outcome.session_file,
+                       password_field=job.context_secret)
+        except Exception as exc:
+            diagnostic('llm_log_dropped', reason='hook_error', error=type(exc).__name__)
+
+    def _research_cancel(self, reason):
+        """Cancel the running research session (never a kill by pattern)."""
+        runner = getattr(self, 'research_runner', None)
+        cancelled = bool(runner is not None and runner.cancel(reason))
+        diagnostic('research_cancel', reason=reason, signalled=cancelled)
+        if cancelled:
+            job = getattr(self, '_research_job', None)
+            if job is not None and job.phase == 'researching':
+                job.step = 'cancelling'
+        return cancelled
+
+    def _research_escape(self):
+        """Escape (key listener thread): cancel only while a session runs; cheap otherwise."""
+        runner = getattr(self, 'research_runner', None)
+        if runner is not None and runner.busy:
+            self._research_cancel('escape')
+
     def _typing_session(self, session):
         first_chunk = True
         ledger = session.ledger
@@ -2787,6 +2972,9 @@ class App():
             self.input_trace = selection_release.InputTrace(focus=self._focus_reader())
             keylistener.trace = self.input_trace
             self.key_listener = keylistener
+            config = getattr(self, 'research_config', None)
+            if config is not None and config.escape_cancels:
+                keylistener.escape_callback = self._research_escape
             self.input_trace.set_known(keys=True)
             self._start_input_mouse_listener()
             print("Double tap %s to start/stop (language: %s). Hold Left-Shift + double tap to dictate in %s."

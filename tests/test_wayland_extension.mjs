@@ -197,6 +197,39 @@ for (const args of [['Hallo wereld', 'dictate', '', 0], ['recording', 'Geachte h
     ['toString', 'dictate', '', 0], ['recording', '__proto__', '', 0], ['recording', 'dictate', 'english', 0]])
     assert.throws(() => helper.SetStatus(...args), /not allowed/);
 assert.equal(stage.length, 0);
+// Research box: phase, step code, seconds and steps; fixed Dutch words, own clock.
+helper.SetStatus('recording', 'research', '', 120);
+assert.equal(stage[0].text, 'Onderzoek · context: 120 tekens — ● opnemen 0:00');
+helper.SetResearch('researching', 'bash:rg', 65, 3);
+assert.equal(stage.length, 1);
+assert.equal(stage[0].text, 'Onderzoek — bezig 1:05 · stap 3 · commando (rg)');
+assert.match(stage[0].style, /#1c5fb4/);
+assert.deepEqual(timers(), [1000, 3_900_000]);
+now += 2_000_000;
+[...timeouts.values()].find(([ms]) => ms === 1000)[1]();
+assert.equal(stage[0].text, 'Onderzoek — bezig 1:07 · stap 3 · commando (rg)');
+helper.SetResearch('researching', 'web_search', 70, 4);
+assert.equal(stage[0].text, 'Onderzoek — bezig 1:10 · stap 4 · web zoeken');
+helper.SetResearch('researching', 'blocked', 71, 5);
+assert.equal(stage[0].text, 'Onderzoek — bezig 1:11 · stap 5 · geweigerde actie');
+helper.SetResearch('researching', 'some_tool', 72, 6);
+assert.equal(stage[0].text, 'Onderzoek — bezig 1:12 · stap 6 · some_tool');
+helper.SetStatus('recording', 'dictate', '', 0);   // a dictation takes the box; its clock restarts
+assert.equal(stage[0].text, 'Dictatie — ● opnemen 0:00');
+for (const [phase, step, ms, words] of [['done', '', 4000, 'Onderzoek — klaar, geplakt ✓'],
+    ['clipboard', 'focus_changed', 20000, 'Onderzoek — klaar, resultaat op het klembord (Ctrl+V): ander venster actief'],
+    ['clipboard', 'question', 20000, 'een vraag aan jou'],
+    ['failed', 'timeout', 10000, 'Onderzoek — mislukt: tijdslimiet bereikt'],
+    ['failed', 'pi_exit_1', 10000, 'Onderzoek — mislukt: pi_exit_1']]) {
+    helper.SetResearch(phase, step, 90, 7);
+    assert.ok(stage[0].text.includes(words), phase + step);
+    assert.deepEqual(timers(), [ms]);
+}
+helper.ClearStatus();
+for (const args of [['bezig', '', 0, 0], ['researching', 'Zoek de factuur', 0, 0], ['researching', 'Bash', 0, 0],
+    ['toString', '', 0, 0], ['researching', '__proto__', 0, 0], ['done', 'x'.repeat(41), 0, 0]])
+    assert.throws(() => helper.SetResearch(...args), /not allowed/);
+assert.equal(stage.length, 0);
 // Focus on the other monitor: box on that monitor; still there at disable -> removed.
 display.focus_window = other;
 helper.SetStatus('recording', 'dictate', '', 0);

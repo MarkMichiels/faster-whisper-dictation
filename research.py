@@ -51,8 +51,17 @@ BLOCK_PREFIX = 'Blocked by the dictation research guard'
 TERM_GRACE_S = 5.0
 AFTER_RESULT_S = 30.0       # a session that delivered but does not exit is stopped
 STDERR_TAIL = 4096
+READER_GRACE_S = 3.0        # output still open this long after Pi exited: signal the group
 STEP_RE = re.compile(r'[a-z][a-z0-9_.:-]{0,39}')
 FINAL_STATUSES = ('done', 'no_result', 'question')
+# Programs the status box may name for a bash step. Anything else shows as
+# 'bash': the first word of a command could be dictated text.
+KNOWN_PROGRAMS = frozenset((
+    'awk', 'base64', 'basename', 'bc', 'cat', 'cd', 'column', 'curl', 'cut', 'date', 'df', 'diff', 'dirname',
+    'du', 'echo', 'env', 'fd', 'fdfind', 'file', 'find', 'git', 'grep', 'head', 'jq', 'less', 'ls', 'make',
+    'md5sum', 'node', 'od', 'pandoc', 'pdfinfo', 'pdftotext', 'printf', 'pwd', 'python', 'readlink',
+    'realpath', 'rg', 'sed', 'sha256sum', 'sort', 'sqlite', 'stat', 'tail', 'test', 'tr', 'tree', 'true',
+    'uniq', 'wc', 'wget', 'which', 'xxd', 'yq'))
 
 
 @dataclass(frozen=True)
@@ -166,7 +175,7 @@ def step_code(tool: Any, args: Any = None) -> str:
             words.pop(0)  # VAR=value prefixes
         program = os.path.basename(words[0]) if words else ''
         program = re.sub(r'\d+(\.\d+)*$', '', program.lower())  # python3.12 -> python
-        if re.fullmatch(r'[a-z][a-z0-9_-]{0,15}', program):
+        if program in KNOWN_PROGRAMS:
             return 'bash:' + program
     return name
 
@@ -191,7 +200,7 @@ class Outcome:
 
 
 class Run:
-    """One Pi session. start() returns at once; on_finish(outcome) runs on the reader thread."""
+    """One Pi session. start() returns at once; on_finish(outcome) runs on a thread of the run."""
 
     def __init__(self, cfg: ResearchConfig, prompt: str,
                  on_progress: Optional[Callable[[str, int], None]] = None,
@@ -241,9 +250,12 @@ class Run:
         self.log('research_started', pid=self.pid, session_id=self.session_id, model=self.cfg.model,
                  thinking=self.cfg.thinking, timeout_s=self.cfg.timeout_s)
         threading.Thread(target=self._feed, daemon=True, name='research-stdin').start()
-        threading.Thread(target=self._read_stderr, daemon=True, name='research-stderr').start()
+        self._stderr_reader = threading.Thread(target=self._read_stderr, daemon=True, name='research-stderr')
+        self._reader = threading.Thread(target=self._read, daemon=True, name='research-reader')
+        self._stderr_reader.start()
+        self._reader.start()
         threading.Thread(target=self._watchdog, daemon=True, name='research-watchdog').start()
-        threading.Thread(target=self._read, daemon=True, name='research-reader').start()
+        threading.Thread(target=self._finish, daemon=True, name='research-finish').start()
         self._progress('starting')
         return self
 
@@ -369,6 +381,7 @@ class Run:
             self._terminate()
 
     def _read(self) -> None:
+        """Parse Pi's JSONL until EOF. The outcome comes from _finish, not from here."""
         try:
             for raw in iter(self.proc.stdout.readline, b''):
                 line = raw.rstrip(b'\r\n')
@@ -385,10 +398,33 @@ class Run:
                         self.log('research_record_error', error=type(exc).__name__)
         except (OSError, ValueError):
             pass
+
+    def _finish(self) -> None:
+        """Wait for Pi to exit, then for its output; report the outcome once.
+
+        A process Pi left behind in our group can keep stdout open after Pi
+        exits. The group is then signalled once (it cannot have been reused
+        while it has members) and the outcome is reported regardless."""
         try:
             returncode = self.proc.wait()
         except Exception:  # noqa: BLE001
             returncode = None
+        self._reader.join(READER_GRACE_S)
+        if self._reader.is_alive():
+            self.log('research_output_open_after_exit', pid=self.pid)
+            try:
+                os.killpg(self.proc.pid, signal.SIGTERM)
+            except (ProcessLookupError, PermissionError, OSError):
+                pass
+            self._reader.join(READER_GRACE_S)
+        self._stderr_reader.join(READER_GRACE_S)
+        if not self._reader.is_alive():
+            for stream in (self.proc.stdout, getattr(self.proc, 'stderr', None)):
+                try:
+                    if stream is not None:
+                        stream.close()
+                except Exception:  # noqa: BLE001
+                    pass
         outcome = self._outcome(returncode)
         self._done.set()
         try:
@@ -493,3 +529,60 @@ class Runner:
             return False
         threading.Thread(target=run.cancel, args=(reason,), daemon=True).start()
         return True
+
+
+# --- command line (install.sh --check) ----------------------------------------
+
+EXTENSION_FILES = ('research.ts', 'policy.mjs', 'session_brief.md')
+
+
+def check(loaded: Any) -> tuple[bool, list[str]]:
+    """(ok, lines): off is fine; on needs pi, node and the extension files."""
+    if not loaded.get('research.enabled'):
+        return True, ['Research mode: off (research.enabled is false)']
+    lines, ok = [], True
+    for kind, details in getattr(loaded, 'events', ()):
+        if str(details.get('key', '')).startswith('research.'):
+            ok = False
+            lines.append('Research mode: %s refused (%s); the default applies'
+                         % (details.get('key'), details.get('reason', kind)))
+    for name in EXTENSION_FILES:
+        if not os.path.isfile(os.path.join(HERE, 'research_ext', name)):
+            ok = False
+            lines.append('Research mode: MISSING research_ext/%s' % name)
+    cfg, reason = load_config(loaded)
+    if cfg is None:
+        ok = False
+        lines.append('Research mode: NOT USABLE (%s); AltGr sessions dictate normally' % reason)
+        return ok, lines
+    node = cfg.node_bin or shutil.which('node')
+    try:
+        version = subprocess.run([node, '--version'], capture_output=True, timeout=10,
+                                 check=False).stdout.decode().strip()
+    except Exception as exc:  # noqa: BLE001
+        version, ok = '', False
+        lines.append('Research mode: node does not run (%s)' % type(exc).__name__)
+    if ok:
+        lines.append('Research mode: on; pi %s, node %s %s, model %s, cwd %s, notes %s'
+                     % (cfg.pi_bin, node, version, cfg.model, cfg.cwd, os.path.relpath(cfg.notes_dir, cfg.cwd)))
+    return ok, lines
+
+
+def main(argv: Optional[list] = None) -> int:
+    import argparse
+    import sys
+    import settings
+    parser = argparse.ArgumentParser(description='Research mode helper')
+    parser.add_argument('--check', action='store_true', help='check pi, node and the extension')
+    parser.add_argument('--config', help='config.yaml path (default: see docs/configuration.md)')
+    args = parser.parse_args(argv)
+    if not args.check:
+        parser.print_help()
+        return 2
+    ok, lines = check(settings.load(explicit_path=args.config))
+    print('\n'.join(lines), file=sys.stdout if ok else sys.stderr)
+    return 0 if ok else 1
+
+
+if __name__ == '__main__':
+    raise SystemExit(main())

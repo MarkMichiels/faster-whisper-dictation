@@ -15,6 +15,7 @@ const XML = `<node><interface name="${BUS}">
 <method name="ShowBadge"><arg type="u" direction="in"/></method>
 <method name="SetStatus"><arg type="s" direction="in"/><arg type="s" direction="in"/><arg type="s" direction="in"/><arg type="u" direction="in"/></method>
 <method name="ClearStatus"/>
+<method name="SetResearch"><arg type="s" direction="in"/><arg type="s" direction="in"/><arg type="u" direction="in"/><arg type="u" direction="in"/></method>
 <method name="SelectionInfo"><arg type="s" direction="in"/><arg type="s" direction="out"/><arg type="d" direction="out"/><arg type="s" direction="out"/><arg type="s" direction="out"/><arg type="b" direction="out"/></method>
 </interface></node>`;
 
@@ -57,6 +58,7 @@ const STATUS_MODES = new Map([
     ['rewrite', 'Herschrijven met opmaak'],
     ['rewrite_line', 'Herschrijven als één regel'],
     ['dictate_fallback', 'Dictatie (herschrijven niet beschikbaar)'],
+    ['research', 'Onderzoek'],
 ]);
 const STATUS_LANGUAGES = new Map([['en', 'Engels'], ['nl', 'Nederlands'], ['fr', 'Frans'], ['de', 'Duits']]);
 // text, colour, ms until it hides (stale guard for open phases), clock shown.
@@ -84,6 +86,57 @@ function statusText(phase, mode, language, chars, seconds) {
         const s = Math.max(0, Math.floor(seconds));
         text += ` ${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`;
     }
+    return text;
+}
+
+// Research box (SetResearch): a phase, a step or reason code, seconds, steps.
+// Codes only; unknown codes are shown as the code itself (they are [a-z0-9_.:-]).
+const RESEARCH_STEP_RE = /^([a-z][a-z0-9_.:-]{0,39})?$/;
+const RESEARCH_STEPS = new Map([
+    ['starting', 'starten'], ['thinking', 'nadenken'], ['writing', 'antwoord schrijven'],
+    ['bash', 'commando'], ['read', 'bestand lezen'], ['write', 'notitie schrijven'], ['edit', 'bestand aanvullen'],
+    ['grep', 'zoeken in bestanden'], ['find', 'bestanden zoeken'], ['ls', 'map bekijken'],
+    ['web_search', 'web zoeken'], ['fetch_content', 'webpagina lezen'], ['code_search', 'code zoeken'],
+    ['get_search_content', 'zoekresultaat lezen'], ['web_enable', 'webtools laden'], ['tool_search', 'tools zoeken'],
+    ['deliver_result', 'resultaat afleveren'], ['blocked', 'geweigerde actie'], ['cancelling', 'afbreken…'],
+]);
+// phase -> text, colour, ms until it hides.
+const RESEARCH_PHASES = new Map([
+    ['researching', ['bezig', 'busy', 3_900_000]],
+    ['done', ['klaar, geplakt ✓', 'ok', 4000]],
+    ['clipboard', ['klaar, resultaat op het klembord (Ctrl+V)', 'ok', 20000]],
+    ['failed', ['mislukt', 'error', 10000]],
+]);
+const RESEARCH_REASONS = new Map([
+    ['focus_changed', 'ander venster actief'], ['question', 'een vraag aan jou'],
+    ['dictation_busy', 'dictatie was bezig'], ['paste_refused', 'plakken geweigerd'],
+    ['timeout', 'tijdslimiet bereikt'], ['cancelled', 'afgebroken'], ['hotkey', 'afgebroken'],
+    ['escape', 'afgebroken met Escape'], ['busy', 'er loopt al een onderzoek'],
+    ['start_failed', 'Pi start niet'], ['no_result', 'niets gevonden'], ['no_deliver_result', 'geen resultaat afgeleverd'],
+    ['empty_text', 'leeg resultaat'], ['provider_error', 'fout bij het model'], ['auth', 'niet aangemeld bij het model'],
+    ['model_unknown', 'model onbekend'], ['clipboard_failed', 'klembord niet gezet'],
+]);
+
+function researchStep(step) {
+    const [tool, detail] = step.split(':', 2);
+    const label = RESEARCH_STEPS.get(tool) ?? tool;
+    return detail ? `${label} (${detail})` : label;
+}
+
+function researchText(phase, step, steps, seconds) {
+    const [label] = RESEARCH_PHASES.get(phase);
+    if (phase === 'researching') {
+        const s = Math.max(0, Math.floor(seconds));
+        let text = `Onderzoek — ${label} ${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`;
+        if (steps > 0)
+            text += ` · stap ${steps}`;
+        if (step)
+            text += ` · ${researchStep(step)}`;
+        return text;
+    }
+    let text = `Onderzoek — ${label}`;
+    if (step)
+        text += `: ${RESEARCH_REASONS.get(step) ?? step}`;
     return text;
 }
 
@@ -217,9 +270,9 @@ export default class DictationHelper extends Extension {
         const now = GLib.get_monotonic_time();
         const previous = this._statusState;
         // The clock restarts when the phase or mode changes, not on a repeat.
-        const since = previous && previous.phase === phase && previous.mode === mode
-            ? previous.since : now;
-        this._statusState = {phase, mode, language, chars: Math.max(0, Math.floor(chars)), since};
+        const since = previous && previous.kind === 'status' && previous.phase === phase &&
+            previous.mode === mode ? previous.since : now;
+        this._statusState = {kind: 'status', phase, mode, language, chars: Math.max(0, Math.floor(chars)), since};
         if (!this._status) {
             this._status = new St.Label({text: '', reactive: false, can_focus: false, track_hover: false});
             Main.layoutManager.uiGroup.add_child(this._status);
@@ -234,6 +287,39 @@ export default class DictationHelper extends Extension {
             this.ClearStatus();
             return GLib.SOURCE_REMOVE;
         });
+        if (clock && !this._statusTick) {
+            this._statusTick = GLib.timeout_add(GLib.PRIORITY_DEFAULT, 1000, () => {
+                this._drawStatus();
+                return GLib.SOURCE_CONTINUE;
+            });
+        } else if (!clock && this._statusTick) {
+            GLib.source_remove(this._statusTick);
+            this._statusTick = 0;
+        }
+    }
+
+    // Research box: shares the status label; the dictation's own states win
+    // because the service only sends this while the dictation is idle.
+    SetResearch(phase, step, seconds, steps) {
+        if (!RESEARCH_PHASES.has(phase) || !RESEARCH_STEP_RE.test(step))
+            throw new Error('Research status not allowed');
+        const since = GLib.get_monotonic_time() - Math.max(0, Math.floor(seconds)) * 1e6;
+        this._statusState = {kind: 'research', phase, step, steps: Math.max(0, Math.floor(steps)), since};
+        if (!this._status) {
+            this._status = new St.Label({text: '', reactive: false, can_focus: false, track_hover: false});
+            Main.layoutManager.uiGroup.add_child(this._status);
+        }
+        const [, colour, hideMs] = RESEARCH_PHASES.get(phase);
+        this._status.set_style(STATUS_BASE + STATUS_COLOURS.get(colour) + ';');
+        this._drawStatus();
+        if (this._statusTimeout)
+            GLib.source_remove(this._statusTimeout);
+        this._statusTimeout = GLib.timeout_add(GLib.PRIORITY_DEFAULT, hideMs, () => {
+            this._statusTimeout = 0;
+            this.ClearStatus();
+            return GLib.SOURCE_REMOVE;
+        });
+        const clock = phase === 'researching';
         if (clock && !this._statusTick) {
             this._statusTick = GLib.timeout_add(GLib.PRIORITY_DEFAULT, 1000, () => {
                 this._drawStatus();
@@ -260,7 +346,9 @@ export default class DictationHelper extends Extension {
     _drawStatus() {
         const state = this._statusState;
         const seconds = (GLib.get_monotonic_time() - state.since) / 1e6;
-        this._status.set_text(statusText(state.phase, state.mode, state.language, state.chars, seconds));
+        this._status.set_text(state.kind === 'research'
+            ? researchText(state.phase, state.step, state.steps, seconds)
+            : statusText(state.phase, state.mode, state.language, state.chars, seconds));
         const area = Main.layoutManager.getWorkAreaForMonitor(this._monitor());
         const [, width] = this._status.get_preferred_width(-1);
         this._status.set_position(area.x + Math.max(0, area.width - width - STATUS_MARGIN),

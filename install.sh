@@ -270,10 +270,18 @@ check_llm_log() {
     DICTATION_CONFIG="${DICTATION_CONFIG:-$CONFIG_FILE}" "$python" "$SCRIPT_DIR/llm_log.py" --check
 }
 
+# Research mode (docs/research.md): off, or pi, node and research_ext/ usable.
+check_research() {
+    local python=python3
+    [ ! -x "$VENV_DIR/bin/python3" ] || python="$VENV_DIR/bin/python3"
+    DICTATION_CONFIG="${DICTATION_CONFIG:-$CONFIG_FILE}" "$python" "$SCRIPT_DIR/research.py" --check
+}
+
 if $CHECK_ONLY; then
     detect_ld_path
     log_ok=true
     check_llm_log || log_ok=false
+    check_research || log_ok=false
     if unit_is_current; then
         echo "CURRENT: revision $REVISION is installed, enabled for the graphical session, and active"
         $log_ok && exit 0

@@ -79,3 +79,16 @@ log:
   # text_days: 90    # Days the text (context, dictation, answer) is kept; then wiped, metadata stays; 0 = keep text.
   # meta_days: 730    # Days a row (time, model, duration, cost, status) is kept; 0 = keep.
   # context_max_chars: 0    # Most characters of context stored per call (beginning and end); 0 = all that was sent.
+
+research:
+  # enabled: false    # Research mode (AltGr + double tap): the dictation starts one autonomous Pi session in the background and its result is pasted (docs/research.md). Off: AltGr dictates normally.
+  # pi_bin: null    # Absolute path of the pi executable; research mode needs it.
+  # node_bin: null    # Absolute path of node when it is not on the service PATH (e.g. nvm); null = node from PATH.
+  # model: anthropic/claude-sonnet-5-5    # Pi model as provider/id. Allowed providers: anthropic, openai-codex, openrouter; any other is refused.
+  # thinking: medium    # Pi thinking level.
+  # cwd: null    # Working directory of the session (its AGENTS.md and skills apply); research mode needs it.
+  # notes_dir: research_notes    # Directory, relative to research.cwd, where the session may write its own note; nothing else is writable.
+  # proposals: true    # The session may also add a new file in a folder named issues/ or insert (never change or delete) lines in a PLAN.md under research.cwd.
+  # timeout_s: 600    # Hard stop of a session in seconds.
+  # visible: true    # Show the session in the Pi dashboard (PI_DASHBOARD_VISIBLE=1).
+  # escape_cancels: true    # Escape cancels a running session (AltGr + double tap always does).

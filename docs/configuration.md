@@ -147,6 +147,17 @@ table and `config.example.yaml` in step with the code.
 | `log.text_days` | int | `90` | 0–36500 |  |  | Days the text (context, dictation, answer) is kept; then wiped, metadata stays; 0 = keep text. |
 | `log.meta_days` | int | `730` | 0–36500 |  |  | Days a row (time, model, duration, cost, status) is kept; 0 = keep. |
 | `log.context_max_chars` | int | `0` | 0–500000 |  |  | Most characters of context stored per call (beginning and end); 0 = all that was sent. |
+| `research.enabled` | bool | `false` |  |  |  | Research mode (AltGr + double tap): the dictation starts one autonomous Pi session in the background and its result is pasted (docs/research.md). Off: AltGr dictates normally. |
+| `research.pi_bin` | string or null | `null` |  |  |  | Absolute path of the pi executable; research mode needs it. |
+| `research.node_bin` | string or null | `null` |  |  |  | Absolute path of node when it is not on the service PATH (e.g. nvm); null = node from PATH. |
+| `research.model` | string | `anthropic/claude-sonnet-5-5` |  |  |  | Pi model as provider/id. Allowed providers: anthropic, openai-codex, openrouter; any other is refused. |
+| `research.thinking` | string | `medium` | off | minimal | low | medium | high | xhigh | max |  |  | Pi thinking level. |
+| `research.cwd` | string or null | `null` |  |  |  | Working directory of the session (its AGENTS.md and skills apply); research mode needs it. |
+| `research.notes_dir` | string | `research_notes` |  |  |  | Directory, relative to research.cwd, where the session may write its own note; nothing else is writable. |
+| `research.proposals` | bool | `true` |  |  |  | The session may also add a new file in a folder named issues/ or insert (never change or delete) lines in a PLAN.md under research.cwd. |
+| `research.timeout_s` | int | `600` | 30–3600 |  |  | Hard stop of a session in seconds. |
+| `research.visible` | bool | `true` |  |  |  | Show the session in the Pi dashboard (PI_DASHBOARD_VISIBLE=1). |
+| `research.escape_cancels` | bool | `true` |  |  |  | Escape cancels a running session (AltGr + double tap always does). |
 <!-- settings-table:end -->
 
 Notes:
