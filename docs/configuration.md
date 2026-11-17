@@ -84,8 +84,9 @@ See the full [key table and clipboard safety rules](rewrite_mode.md#use).
 Audio formats (16 kHz, 512/1024 frames), helper-program time-outs, the recovery
 heuristics, the voice-activity and level thresholds, prompts and the silence
 artefact list stay in the code. So do the safety and privacy gates: the secret
-filter on the reply context, the https-only endpoint rule and the
-zero-data-retention / no-data-collection provider flags. A configuration file
+filter on the reply context, the https-only endpoint rule, the
+zero-data-retention / no-data-collection provider flags, and the LLM log's
+secret filter and password-window skip ([llm_log.md](llm_log.md)). A configuration file
 must not be able to switch those off.
 
 ## Keys
@@ -140,6 +141,11 @@ table and `config.example.yaml` in step with the code.
 | `rewrite.context.clipboard_max_age_s` | float | `120` | 0–3600 |  |  | Oldest clipboard text used as context. |
 | `rewrite.context.release_selection` | bool | `true` |  |  |  | After a Ctrl+A selection was taken as context, send one Ctrl+Home once the start keys are released. |
 | `rewrite.context.badge` | bool | `true` |  |  |  | Show a small corner badge when context was taken (length only). |
+| `log.enabled` | bool | `false` |  |  |  | Keep a local, searchable log of every LLM call with its text (docs/llm_log.md). The secret filter and the password-window skip always apply. |
+| `log.path` | string or null | `null` |  |  |  | Log database; null = $XDG_DATA_HOME/faster-whisper-dictation/llm_log.db. |
+| `log.text_days` | int | `90` | 0–36500 |  |  | Days the text (context, dictation, answer) is kept; then wiped, metadata stays; 0 = keep text. |
+| `log.meta_days` | int | `730` | 0–36500 |  |  | Days a row (time, model, duration, cost, status) is kept; 0 = keep. |
+| `log.context_max_chars` | int | `0` | 0–500000 |  |  | Most characters of context stored per call (beginning and end); 0 = all that was sent. |
 <!-- settings-table:end -->
 
 Notes:

@@ -321,6 +321,10 @@ how long ago released). The
 raw dictation is still logged by the ordinary `DCT-COVERAGE` records, as in
 ordinary dictation. CopyQ history receives both the raw and the pasted text.
 
+With `log.enabled: true` the dictation, the context as sent and the model's
+answer are also kept in a local, private database for later search; see
+[LLM log](llm_log.md). It is off by default.
+
 ## Tests
 
 `tests/test_formatting.py` covers the complete eight-row modifier table,

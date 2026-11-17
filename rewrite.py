@@ -492,6 +492,13 @@ class RewriteResult:
     ok: bool
     reason: Optional[str] = None
     html: Optional[str] = None
+    # For the LLM log (llm_log.py), never for the journal: the journal record
+    # metadata (no text), the model's composed answer (also when it was
+    # rejected) and the system prompt sent (the log keeps only its hash).
+    # meta is None when no call was attempted.
+    meta: Optional[dict[str, Any]] = None
+    answer: Optional[str] = None
+    system_prompt: Optional[str] = None
 
 
 def rewrite(raw: str, language: Optional[str], context: Optional[str],
@@ -521,6 +528,8 @@ def rewrite(raw: str, language: Optional[str], context: Optional[str],
     messages, field = build_messages(raw, language, context, config, rich)
     think = config.reasoning == 'always' or (config.reasoning == 'email' and email_block(raw, context) is None)
     meta['reasoning'] = think
+    system = messages[0]['content']
+    composed: Optional[str] = None
     body = {
         'model': config.model,
         'messages': messages,
@@ -565,6 +574,7 @@ def rewrite(raw: str, language: Optional[str], context: Optional[str],
         if blocked:
             meta['email_blocked'] = blocked
         out, is_email = compose(answer, field, config.signature, raw, plain=bool(blocked))
+        composed = out
         if rich:
             # Compose mail parts through the same gate/name rules, but render
             # those fields literally: only the body may contain Markdown.
@@ -586,10 +596,10 @@ def rewrite(raw: str, language: Optional[str], context: Optional[str],
     except RewriteError as exc:
         meta.setdefault('seconds', round(time.monotonic() - t0, 3))
         diagnostic('rewrite_failed', reason=exc.reason, **dict(meta, **exc.details))
-        return RewriteResult(raw, False, exc.reason)
+        return RewriteResult(raw, False, exc.reason, meta=meta, answer=composed, system_prompt=system)
     except Exception as exc:  # noqa: BLE001 - never lose the dictation
         meta.setdefault('seconds', round(time.monotonic() - t0, 3))
         diagnostic('rewrite_failed', reason='exception', error=type(exc).__name__, **meta)
-        return RewriteResult(raw, False, 'exception')
+        return RewriteResult(raw, False, 'exception', meta=meta, answer=composed, system_prompt=system)
     diagnostic('rewrite_outcome', result='rewritten', **meta)
-    return RewriteResult(out, True, html=html)
+    return RewriteResult(out, True, html=html, meta=meta, answer=composed, system_prompt=system)

@@ -42,6 +42,7 @@ recognition, this source adds:
 | `coverage_ledger.py` | RAM samples, contiguous outcome ranges, numeric audio statistics, bounded stop recovery, corrections and JSON diagnostics |
 | `settings.py` | One settings file (`config.yaml`): schema with defaults, validation, precedence (CLI > `DICTATION_REWRITE_*` > YAML > code), journal of sources without values, `rewrite.env` migration; see [Configuration](configuration.md) |
 | `rewrite.py` | Optional rich or plain-terminal rewrite: merged settings, one chat-completions call (stdlib), JSON/mail/visible-word checks and raw-text fallback |
+| `llm_log.py` | Optional local, searchable log of LLM calls: SQLite (WAL, FTS5) outside the repository, filled by one writer thread off the paste path; secret filter, password-window skip, daily retention; see [LLM log](llm_log.md) |
 | `rich_text.py` | Restricted Markdown token renderer (markdown-it-py, raw HTML off): escaped tag whitelist, same-tree plain text, literal mail paragraphs; never active links or resources |
 | `context_capture.py` | Optional rewrite mode: one-time PRIMARY/CLIPBOARD reply-context capture with age, origin and secret checks |
 | `selection_release.py` | Optional rewrite mode: decide from the app's own key/mouse trace whether a Ctrl+A selection taken as context may be released with one Ctrl+Home after the start keys are up |

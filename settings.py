@@ -149,6 +149,15 @@ SCHEMA: tuple[Setting, ...] = (
     _s('rewrite.context.release_selection', 'bool', True, 'After a Ctrl+A selection was taken as context, '
        'send one Ctrl+Home once the start keys are released.'),
     _s('rewrite.context.badge', 'bool', True, 'Show a small corner badge when context was taken (length only).'),
+    _s('log.enabled', 'bool', False, 'Keep a local, searchable log of every LLM call with its text '
+       '(docs/llm_log.md). The secret filter and the password-window skip always apply.'),
+    _s('log.path', 'str?', None, 'Log database; null = $XDG_DATA_HOME/faster-whisper-dictation/llm_log.db.'),
+    _s('log.text_days', 'int', 90, 'Days the text (context, dictation, answer) is kept; then wiped, '
+       'metadata stays; 0 = keep text.', low=0, high=36_500),
+    _s('log.meta_days', 'int', 730, 'Days a row (time, model, duration, cost, status) is kept; 0 = keep.',
+       low=0, high=36_500),
+    _s('log.context_max_chars', 'int', 0, 'Most characters of context stored per call (beginning and end); '
+       '0 = all that was sent.', low=0, high=500_000),
 )
 BY_PATH = {s.path: s for s in SCHEMA}
 GROUPS = tuple(dict.fromkeys(s.path.split('.')[0] for s in SCHEMA))

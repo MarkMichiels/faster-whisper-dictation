@@ -71,3 +71,10 @@ rewrite:
     # clipboard_max_age_s: 120    # Oldest clipboard text used as context.
     # release_selection: true    # After a Ctrl+A selection was taken as context, send one Ctrl+Home once the start keys are released.
     # badge: true    # Show a small corner badge when context was taken (length only).
+
+log:
+  # enabled: false    # Keep a local, searchable log of every LLM call with its text (docs/llm_log.md). The secret filter and the password-window skip always apply.
+  # path: null    # Log database; null = $XDG_DATA_HOME/faster-whisper-dictation/llm_log.db.
+  # text_days: 90    # Days the text (context, dictation, answer) is kept; then wiped, metadata stays; 0 = keep text.
+  # meta_days: 730    # Days a row (time, model, duration, cost, status) is kept; 0 = keep.
+  # context_max_chars: 0    # Most characters of context stored per call (beginning and end); 0 = all that was sent.

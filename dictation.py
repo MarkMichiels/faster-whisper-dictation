@@ -1192,6 +1192,8 @@ class KeyboardReplayer():
             print(text)
         focus_ok = self._restore_target_window()
         wm_class = self._get_active_window_class()
+        # For the LLM log only (password-manager skip); never journaled.
+        self.last_window_class = wm_class
         terminal = terminal_mode or wm_class in self.TERMINAL_CLASSES
         # Central safety boundary: every paste, including correction/check lines.
         # Include all separators recognized by str.splitlines, not just CR/LF.
@@ -1956,6 +1958,9 @@ class App():
             # Language the rewrite is written in; by default the recognition language.
             self.output_language = language if output_language is _UNSET else output_language
             self.context = None
+            # True when a context source was refused as secret (password
+            # manager hint): the LLM log then keeps no row of this session.
+            self.context_secret = False
             self.paste_wid = None
             self.held = []
             self.done = threading.Event()
@@ -2003,6 +2008,14 @@ class App():
         # the hotkey falls back to ordinary dictation with a journal line.
         self.rewrite_config, self.rewrite_reason = rewrite.load_config(REWRITE_ENVIRON)
         self._announce_rewrite()
+        # LLM log (log.* settings): a writer thread; the paste path only queues.
+        self.llm_log = None
+        if getattr(args, 'settings', None) is not None:
+            try:
+                import llm_log
+                self.llm_log = llm_log.from_settings(args.settings, diagnostic)
+            except Exception as exc:  # never stop dictation for the log
+                diagnostic('llm_log_unavailable', error=type(exc).__name__)
         self.status = self._make_status_box()
 
     def _make_status_box(self):
@@ -2178,6 +2191,7 @@ class App():
             context = context_capture.capture(max_chars=self.rewrite_config.context_max_chars, **options)
             read_done = time.monotonic()
             session.context = context.text
+            session.context_secret = 'secret_hint' in (context.reasons or {}).values()
             diagnostic('rewrite_context', **context.journal())
             start_sound = 'rewrite_start_context' if context.text else 'rewrite_start'
             if context.text:
@@ -2561,6 +2575,30 @@ class App():
         self.beep('rewrite_done' if result.ok and (delivery or {}).get('ok') else 'rewrite_failed', wait=False)
         self._status(session, 'pasted' if result.ok and (delivery or {}).get('ok') else
                      'raw_pasted' if (delivery or {}).get('ok') else 'paste_refused', final=True)
+        self._log_rewrite(session, raw, result, delivery, None if output is _UNSET else output)
+
+    def _log_rewrite(self, session, raw, result, delivery, language):
+        """Queue one LLM-log row after the paste; never blocks, never raises."""
+        log = getattr(self, 'llm_log', None)
+        meta = getattr(result, 'meta', None)
+        if log is None or not meta:
+            return  # log off, or no call was attempted (not configured)
+        try:
+            window_class = getattr(self.replayer, 'last_window_class', '')
+            status = 'ok' if result.ok else 'timeout' if result.reason == 'timeout' else 'failed'
+            seconds = meta.get('seconds')
+            log.record(kind='rewrite', mode='regel' if getattr(session, 'terminal_mode', False) else 'opmaak',
+                       language=language or meta.get('language'), model=meta.get('model'),
+                       provider=meta.get('provider'), system_prompt=getattr(result, 'system_prompt', None),
+                       ms=round(seconds * 1000) if isinstance(seconds, (int, float)) else None,
+                       tokens_in=meta.get('tokens_in'), tokens_out=meta.get('tokens_out'), cost=meta.get('cost'),
+                       status=status, reason=None if result.ok else result.reason,
+                       delivered='pasted' if (delivery or {}).get('ok') else 'none',
+                       context=session.context, input=raw, output=getattr(result, 'answer', None),
+                       window_class=window_class if isinstance(window_class, str) else '',
+                       password_field=bool(getattr(session, 'context_secret', False)))
+        except Exception as exc:
+            diagnostic('llm_log_dropped', reason='hook_error', error=type(exc).__name__)
 
     def _typing_session(self, session):
         first_chunk = True

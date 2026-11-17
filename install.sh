@@ -263,11 +263,20 @@ if $WAYLAND; then
     check_wayland || exit 1
 fi
 
+# LLM log (docs/llm_log.md): off, or its directory 0700 and files 0600.
+check_llm_log() {
+    local python=python3
+    [ ! -x "$VENV_DIR/bin/python3" ] || python="$VENV_DIR/bin/python3"
+    DICTATION_CONFIG="${DICTATION_CONFIG:-$CONFIG_FILE}" "$python" "$SCRIPT_DIR/llm_log.py" --check
+}
+
 if $CHECK_ONLY; then
     detect_ld_path
+    log_ok=true
+    check_llm_log || log_ok=false
     if unit_is_current; then
         echo "CURRENT: revision $REVISION is installed, enabled for the graphical session, and active"
-        exit 0
+        $log_ok && exit 0
     fi
     exit 1
 fi
