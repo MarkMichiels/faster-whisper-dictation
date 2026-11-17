@@ -50,6 +50,8 @@ CPU inference is selectable, but equal speed or desktop parity is not promised.
    (`config.yaml`), precedence, journal lines and every key with its default.
 5. [Rewrite mode](docs/rewrite_mode.md): optional rewriting of one dictation into
    concise written text by a configured language model (cloud or local).
+6. [Research mode](docs/research.md): optional autonomous Pi agent session that
+   looks a dictated question up and pastes a short result.
 
 These documents travel with a source-only copy: they do not require the fork's
 Git history, local evidence files or a private setup repository. Obtain **this
@@ -64,6 +66,7 @@ fork's agreed snapshot**, not just the upstream repository linked above.
 | Start in the alternate language | Hold **Left Shift** while double-tapping Right Ctrl |
 | Rich AI rewrite (optional, needs configuration) | Hold **Left Alt**; add **Left Shift** for English |
 | Plain AI rewrite / terminal paste | Hold **Left Ctrl** (wins over Alt); add **Left Shift** for English. See [Rewrite mode](docs/rewrite_mode.md) |
+| Research (optional, needs configuration) | Hold **Right Alt (AltGr)**; see [Research mode](docs/research.md). Esc or AltGr + double tap cancels |
 | Start/stop by mouse | Press either configured thumb button |
 | Automatic stop | After about 10 seconds of detected silence |
 

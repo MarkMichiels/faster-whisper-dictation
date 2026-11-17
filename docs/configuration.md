@@ -120,7 +120,7 @@ table and `config.example.yaml` in step with the code.
 | `recognition.replacements_file` | string or null | `null` |  |  |  | Path of a replacement list (wrong form -> right form) applied to every recognised chunk; null = none. |
 | `output.hallucination_filter` | bool | `true` |  | `--no-hallucination-filter` |  | Drop chunks that are only a known silence artefact. |
 | `output.space_rule_runs` | bool | `true` |  | `--no-space-rule-runs` |  | Type '***' as '* * *' so it never renders as Markdown. |
-| `output.ellipsis_style` | string | `space` | space | single | keep | `--ellipsis-style` |  | How '...' is typed: space, single or keep. |
+| `output.ellipsis_style` | string | `space` | space \| single \| keep | `--ellipsis-style` |  | How '...' is typed: space, single or keep. |
 | `output.stop_status` | bool | `true` |  |  |  | Paste a [Controle: ...] line after a session with a correction. |
 | `output.status_box` | bool | `true` |  |  |  | Wayland: a status box top right while dictation runs (mode, phase, counts; never text). Replaces the context badge; false = badge only (rewrite.context.badge). |
 | `output.extra_terminal_classes` | list of strings | `[]` |  |  |  | Extra window classes that paste with Ctrl+Shift+V (added to the built-in list). |
@@ -133,7 +133,7 @@ table and `config.example.yaml` in step with the code.
 | `rewrite.terms_file` | string or null | `null` |  |  | `DICTATION_REWRITE_TERMS_FILE` | Path of a term list, one term per line. |
 | `rewrite.timeout_s` | float | `30` | 1–120 |  | `DICTATION_REWRITE_TIMEOUT_S` | Hard total time-out in seconds. |
 | `rewrite.word_factor` | float | `0` | 0–1 |  | `DICTATION_REWRITE_WORD_FACTOR` | Word maximum for long dictations as factor x words; 0 = off. |
-| `rewrite.reasoning` | string | `never` | never | email | always |  | `DICTATION_REWRITE_REASONING` | Model reasoning before writing: never, email (only when an email may be built) or always. Better order and fewer repetitions, but about 4 s slower. |
+| `rewrite.reasoning` | string | `never` | never \| email \| always |  | `DICTATION_REWRITE_REASONING` | Model reasoning before writing: never, email (only when an email may be built) or always. Better order and fewer repetitions, but about 4 s slower. |
 | `rewrite.provider_order` | list of strings | `[]` |  |  | `DICTATION_REWRITE_PROVIDER_ORDER` | OpenRouter provider preference, e.g. [together, fireworks]. |
 | `rewrite.signature` | string | `""` |  |  | `DICTATION_REWRITE_SIGNATURE` | Name under the sign-off of an email; may span lines. |
 | `rewrite.context.max_chars` | int | `100000` | 1000–500000 |  | `DICTATION_REWRITE_CONTEXT_MAX_CHARS` | Most characters of reply context sent. |
@@ -151,7 +151,7 @@ table and `config.example.yaml` in step with the code.
 | `research.pi_bin` | string or null | `null` |  |  |  | Absolute path of the pi executable; research mode needs it. |
 | `research.node_bin` | string or null | `null` |  |  |  | Absolute path of node when it is not on the service PATH (e.g. nvm); null = node from PATH. |
 | `research.model` | string | `anthropic/claude-sonnet-5-5` |  |  |  | Pi model as provider/id. Allowed providers: anthropic, openai-codex, openrouter; any other is refused. |
-| `research.thinking` | string | `medium` | off | minimal | low | medium | high | xhigh | max |  |  | Pi thinking level. |
+| `research.thinking` | string | `medium` | off \| minimal \| low \| medium \| high \| xhigh \| max |  |  | Pi thinking level. |
 | `research.cwd` | string or null | `null` |  |  |  | Working directory of the session (its AGENTS.md and skills apply); research mode needs it. |
 | `research.notes_dir` | string | `research_notes` |  |  |  | Directory, relative to research.cwd, where the session may write its own note; nothing else is writable. |
 | `research.proposals` | bool | `true` |  |  |  | The session may also add a new file in a folder named issues/ or insert (never change or delete) lines in a PLAN.md under research.cwd. |

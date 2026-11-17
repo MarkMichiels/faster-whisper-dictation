@@ -422,7 +422,7 @@ def doc_table() -> str:
     for s in SCHEMA:
         kind = {'str?': 'string or null', 'str': 'string', 'list': 'list of strings'}.get(s.kind, s.kind)
         rows.append('| `%s` | %s | `%s` | %s | %s | %s | %s |' % (
-            s.path, kind, _yaml_value(s.default), _range(s),
+            s.path, kind, _yaml_value(s.default), _range(s).replace('|', '\\|'),
             '`%s`' % s.flag if s.flag else '', '`%s`' % s.env if s.env else '', s.help))
     return '\n'.join(rows) + '\n'
 

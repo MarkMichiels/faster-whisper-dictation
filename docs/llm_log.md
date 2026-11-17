@@ -5,9 +5,9 @@ model, so past rewrites can be found again and compared (which prompt, which
 model, what came back). Off by default: set `log.enabled: true` in
 `config.yaml` and restart the service.
 
-Only rewrite calls are logged today. The content table already has columns for
-a later research mode that runs a Pi agent session (`pi_session_id`,
-`pi_session_file`); such a session's full transcript stays in Pi's own session
+Rewrite calls and [research mode](research.md) sessions are logged. A research
+session that runs a Pi agent gets a content row with `pi_session_id` and
+`pi_session_file`; the session's full transcript stays in Pi's own session
 file and is not copied, and it gets no `llm_call` record (the session file is
 already its record).
 

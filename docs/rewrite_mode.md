@@ -25,8 +25,9 @@ Stop with one Right Ctrl tap, as usual (or silence auto-stop). Modifiers at
 stop cannot change the mode saved at start. Left Ctrl uses vk 65507; the
 Right Ctrl trigger uses vk 65508. Left Ctrl events never count as taps.
 
-The mouse thumb buttons always start ordinary dictation. Right Alt (AltGr) is
-not used. Shift and Alt may be pressed in either order; both must be held at
+The mouse thumb buttons always start ordinary dictation. Right Alt (AltGr)
+starts [research mode](research.md) when it is configured, and otherwise
+ordinary dictation. Shift and Alt may be pressed in either order; both must be held at
 the second tap.
 
 **English output from Dutch speech.** In rewrite mode Left Shift selects only

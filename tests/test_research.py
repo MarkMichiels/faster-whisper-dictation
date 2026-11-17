@@ -610,6 +610,8 @@ class NodeTests(unittest.TestCase):
             os.makedirs(os.path.join(cwd, 'credentials'))
             Path(cwd, 'dossier', 'PLAN.md').write_text('## Beslissen\n- a\n')
             Path(cwd, 'notes', 'old.md').write_text('old')
+            Path(cwd, 'credentials', 'token.txt').write_text('fake')
+            os.symlink('../credentials/token.txt', os.path.join(cwd, 'dossier', 'settings.md'))
             env = dict(DICTATION_RESEARCH_CWD=cwd, DICTATION_RESEARCH_NOTES=os.path.join(cwd, 'notes'),
                        DICTATION_RESEARCH_PROPOSALS='1')
             cases = [
@@ -626,6 +628,10 @@ class NodeTests(unittest.TestCase):
                 ('bash', {'command': 'echo x > notes/new.md'}, None),
                 ('bash', {'command': 'echo x > dossier/PLAN.md'}, 'redirect_outside'),
                 ('bash', {'command': 'python3 -c "import subprocess"'}, 'script_write'),
+                ('bash', {'command': 'cat dossier/settings.md'}, 'secret_path'),
+                ('bash', {'command': 'head -n 3 "dossier/settings.md"'}, 'secret_path'),
+                ('bash', {'command': 'cat dossier/PLAN.md'}, None),
+                ('read', {'path': 'dossier/settings.md'}, 'secret_path'),
                 ('read', {'path': 'credentials/token.json'}, 'secret_path'),
                 ('read', {'path': '/home/u/.pi/agent/auth.json'}, 'secret_path'),
                 ('read', {'path': 'dossier/PLAN.md'}, None),

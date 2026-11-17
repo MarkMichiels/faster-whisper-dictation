@@ -24,7 +24,7 @@ Allowed: reading, searching files, the local knowledge search the working direct
 
 ## The result
 
-End with exactly one call to `deliver_result`:
+End with exactly one call to `deliver_result`, on its own (not together with other tool calls):
 
 - `text`: what the user asked for, short and ready to paste in place of the selection. Same language as the dictation. No greeting, no sign-off, no preamble ("Here is …"), no explanation of how you worked. Plain text or simple Markdown (paragraphs, lists, bold).
 - `summary`: one line about what you did and the path of your note.

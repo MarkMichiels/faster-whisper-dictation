@@ -212,10 +212,30 @@ function redirectTargets(command) {
 	return targets;
 }
 
+// Words of a command that name an existing path whose real path is a credential
+// (a symlink such as docs/settings.md -> ../credentials/token). Globs and paths
+// built at run time are not seen; see docs/research.md.
+function secretWord(command, cfg) {
+	for (const word of command.split(/[\s;&|()<>`=]+/)) {
+		const w = word.replace(/^["']+|["']+$/g, "");
+		if (!w || w.startsWith("-") || w.length > 4096) continue;
+		const abs = resolveIn(cfg, w);
+		let real;
+		try {
+			real = fs.realpathSync(abs);
+		} catch {
+			continue;
+		}
+		if (real !== abs && SECRET_PATH.test(real)) return true;
+	}
+	return false;
+}
+
 function decideBash(input, cfg) {
 	const command = typeof input?.command === "string" ? input.command : "";
 	if (!command.trim()) return ALLOW;
 	if (SECRET_IN_COMMAND.test(command)) return block("secret_path", "credential path in command");
+	if (secretWord(command, cfg)) return block("secret_path", "path resolves to a credential");
 	for (const [rule, re] of PROGRAM_RULES) if (re.test(command)) return block(rule, "program not allowed");
 	for (const [rule, re] of ARG_RULES) if (re.test(command)) return block(rule, "command not allowed");
 	for (const target of redirectTargets(command)) {

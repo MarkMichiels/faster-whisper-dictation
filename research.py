@@ -49,7 +49,8 @@ EXCLUDE_TOOLS = ('update_roles', 'browser_*', 'ask_user', 'cockpit_claim', 'canv
 # Marker the guard puts at the start of every refusal (policy.mjs, BLOCK_PREFIX).
 BLOCK_PREFIX = 'Blocked by the dictation research guard'
 TERM_GRACE_S = 5.0
-AFTER_RESULT_S = 30.0       # a session that delivered but does not exit is stopped
+AFTER_RESULT_S = 10.0       # a session that delivered but does not exit is stopped
+                            # (research.ts already exits Pi 3 s after its shutdown)
 STDERR_TAIL = 4096
 READER_GRACE_S = 3.0        # output still open this long after Pi exited: signal the group
 STEP_RE = re.compile(r'[a-z][a-z0-9_.:-]{0,39}')
