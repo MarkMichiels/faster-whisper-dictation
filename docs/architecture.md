@@ -195,6 +195,10 @@ recording the same input is only journaled. Each paste writes a metadata-only
 thumb-button name, and `paste_delivery` adds the window class (`app`) and
 whether focus had to be restored (`refocused`). Without a key trace (X11 without
 the multi-tap listener) the guard reports `unknown` and never holds.
+A research result (see [research.md](research.md)) bypasses the guard: it is
+pasted only when the focused window is unchanged, and input during a run of
+minutes is normal. Its paste still writes a `paste_guard` line with
+`mode: research`, `guard: journal`, `since_start_s` and `input_since_start`.
 
 ## Stop and coverage recovery
 

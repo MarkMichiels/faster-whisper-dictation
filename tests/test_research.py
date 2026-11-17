@@ -510,6 +510,26 @@ class AppTests(unittest.TestCase):
         for secret in ('Zeppelin', 'Kwartel', 'Blauwvinger', '77351', 'Vrijdag', 'factuur'):
             self.assertNotIn(secret, journal)
 
+    def test_research_paste_guard_journals_but_never_holds(self):
+        from test_paste_guard import FakeTrace
+        logic, app, events, logged = self.app(focus='win-stop')
+        self.run_session(app, logic)
+        # Mark clicked and typed while research ran: journaled, still pasted
+        # (the unchanged-focus check decides, as before).
+        app.input_trace = FakeTrace(last_mouse_press_at=time.monotonic(),
+                                    last_other_key_at=time.monotonic())
+        out = io.StringIO()
+        with patch('sys.stdout', out), patch('sys.stderr', out):
+            job = self.finish(app, text='Vrijdag geleverd.')
+        self.assertEqual(len([e for e in events if e[0] == 'paste']), 1)
+        self.assertEqual(job.phase, 'done')
+        lines = [json.loads(l.split(' ', 1)[1]) for l in out.getvalue().splitlines()
+                 if l.startswith('DCT-COVERAGE ')]
+        guard = [l for l in lines if l['kind'] == 'paste_guard']
+        self.assertEqual((guard[0]['mode'], guard[0]['guard'], guard[0]['input_since_start']),
+                         ('research', 'journal', 'mouse+key'))
+        self.assertNotIn('Vrijdag', out.getvalue())
+
     def test_clipboard_when_focus_moved(self):
         logic, app, events, logged = self.app(focus='win-elsewhere')
         self.run_session(app, logic)

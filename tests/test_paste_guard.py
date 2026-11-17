@@ -236,6 +236,8 @@ class RewriteHeldTests(unittest.TestCase):
         app.beep = lambda k, wait=True: events.append(('beep', k))
         app.rewrite_config, app.rewrite_reason, app.active = config(), None, False
         app.status = FakeBox()
+        logged = []
+        app.llm_log = types.SimpleNamespace(record=lambda **row: logged.append(row))
         ledger = coverage.CoverageLedger()
         ledger.capture(np.full(10 * R, 8000, dtype=np.int16).tobytes())
         session = app.Session(queue.Queue(), queue.Queue(), ledger, types.SimpleNamespace(_raw_frames=[]),
@@ -254,6 +256,8 @@ class RewriteHeldTests(unittest.TestCase):
         self.assertNotIn('paste', [e[0] for e in events])
         self.assertIn(('beep', 'rewrite_failed'), events)
         self.assertEqual(app.status.shown[-1], 'paste_refused')
+        # LLM log: held text is in CopyQ and on the clipboard, not pasted.
+        self.assertEqual(logged[0]['delivered'], 'clipboard')
 
 
 class ReplayerHoldTests(unittest.TestCase):
