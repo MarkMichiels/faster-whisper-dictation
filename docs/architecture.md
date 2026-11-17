@@ -181,6 +181,21 @@ A wrong widget, moved cursor, unusual terminal shortcut or application handling
 can still defeat a nominally successful paste. Do not switch fields during a
 session and assume targeting is exact.
 
+Pastes are asynchronous: the last chunk usually lands a few seconds after
+stop, while the user may already click or type elsewhere. The paste guard
+(`output.hold_after_input`, default on) therefore checks the input trace before
+every paste. After stop, a mouse press (other than the thumb-button press that
+stopped the session) or a typed key, Ctrl+A included, means the caret may have
+moved: the remaining text of that session is held in CopyQ and on the
+clipboard instead, accumulated per session, with two low tones and status
+`paste_refused`; no window is activated and no shortcut is sent. During
+recording the same input is only journaled. Each paste writes a metadata-only
+`paste_guard` line (`since_stop_s`, `input_after_stop`, `input_since_paste`,
+`mouse_ago_s`, `key_ago_s`, `guard`); `session_stop` records the trigger and
+thumb-button name, and `paste_delivery` adds the window class (`app`) and
+whether focus had to be restored (`refocused`). Without a key trace (X11 without
+the multi-tap listener) the guard reports `unknown` and never holds.
+
 ## Stop and coverage recovery
 
 Manual stop stops and joins the recorder/VAD writers, flushes every remaining
